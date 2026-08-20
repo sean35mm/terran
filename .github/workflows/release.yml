@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify stable tag and catalog version
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$GITHUB_REF_NAME" = "v$(python3 -c 'import json; print(json.load(open("terran.json"))["version"])')"
+      - run: go test -count=1 ./...
+      - run: go test -count=1 -race ./...
+      - run: go vet ./...
+      - run: sh -n install.sh
+      - run: sh -n tests/install_leaf.sh
+      - run: sh tests/install_leaf.sh
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build archives and checksums
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          commit=$GITHUB_SHA
+          date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          mkdir -p dist
+          for os in darwin linux; do
+            for arch in amd64 arm64; do
+              staging=$(mktemp -d)
+              CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$version -X main.commit=$commit -X main.date=$date" -o "$staging/terran" ./cmd/terran
+              cp README.md LICENSE THIRD_PARTY_NOTICES.md "$staging/"
+              tar -C "$staging" -czf "dist/terran_${version}_${os}_${arch}.tar.gz" terran README.md LICENSE THIRD_PARTY_NOTICES.md
+              rm -rf "$staging"
+            done
+          done
+          cp install.sh dist/install.sh
+          cd dist
+          sha256sum install.sh terran_*.tar.gz > SHA256SUMS
+      - name: Publish release once
+        run: gh release create "$GITHUB_REF_NAME" dist/install.sh dist/terran_*.tar.gz dist/SHA256SUMS --verify-tag --title "Terran $GITHUB_REF_NAME" --generate-notes

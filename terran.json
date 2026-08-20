@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "terran-default",
+  "version": "0.1.0",
+  "instructions": [
+    {
+      "target": "claude-global",
+      "source": "instructions/claude/CLAUDE.md"
+    },
+    {
+      "target": "opencode-global",
+      "source": "instructions/opencode/AGENTS.md"
+    }
+  ],
+  "projections": [
+    {
+      "skill": "herdr",
+      "source": "skills/herdr",
+      "targets": ["agents", "claude"]
+    },
+    {
+      "skill": "plainspoken-writing",
+      "source": "skills/plainspoken-writing",
+      "targets": ["agents", "claude"]
+    },
+    {
+      "skill": "terran-curate-skills",
+      "source": "skills/terran-curate-skills",
+      "targets": ["agents", "claude"]
+    },
+    {
+      "skill": "terran-diagnose",
+      "source": "skills/terran-diagnose",
+      "targets": ["agents", "claude"]
+    },
+    {
+      "skill": "terran-enroll",
+      "source": "skills/terran-enroll",
+      "targets": ["agents", "claude"]
+    },
+    {
+      "skill": "terran-update",
+      "source": "skills/terran-update",
+      "targets": ["agents", "claude"]
+    }
+  ]
+}
