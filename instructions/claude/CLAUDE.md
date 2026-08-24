@@ -28,7 +28,6 @@ Read-only delegation (Explore/search agents) is fine whenever it keeps your cont
 delegate the digging, keep the synthesis and decisions. Agents that edit files, and
 multi-agent workflows, need my explicit request.
 
-**Model routing:** if the `picking-models` skill is installed, load it before setting the model
 for a subagent, Workflow stage, or delegated task and follow its routing table. Otherwise use
 the harness's available model-selection guidance rather than assuming that skill exists.
 
