@@ -51,6 +51,22 @@ func instructionDestination(paths Paths, target string) (string, error) {
 	}
 }
 
+func configDestination(paths Paths, target string) (string, error) {
+	switch target {
+	case "opencode-config":
+		return filepath.Join(paths.ConfigBase, "opencode", "opencode.json"), nil
+	default:
+		return "", fmt.Errorf("unsupported config target %q", target)
+	}
+}
+
+func managedFileDestination(paths Paths, kind, target string) (string, error) {
+	if kind == "config" {
+		return configDestination(paths, target)
+	}
+	return instructionDestination(paths, target)
+}
+
 func instructionBackup(paths Paths, target string) string {
 	return filepath.Join(paths.BackupDir, target, "original")
 }

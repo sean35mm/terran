@@ -204,7 +204,13 @@ func TestCLIInstructionJSONHumanAndOpenCodeTarget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "instructions", "AGENTS.md"), []byte("# test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	manifest := `{"schema_version":1,"id":"test-catalog","version":"0.1.0","projections":[],"instructions":[{"target":"opencode-global","source":"instructions/AGENTS.md"}]}`
+	if err := os.MkdirAll(filepath.Join(repo, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "config", "opencode.json"), []byte(`{"default_agent":"naru-orchestrator"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"schema_version":1,"id":"test-catalog","version":"0.1.0","projections":[],"instructions":[{"target":"opencode-global","source":"instructions/AGENTS.md"}],"configs":[{"target":"opencode-config","source":"config/opencode.json"}]}`
 	if err := os.WriteFile(filepath.Join(repo, "terran.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -216,15 +222,20 @@ func TestCLIInstructionJSONHumanAndOpenCodeTarget(t *testing.T) {
 		t.Fatalf("JSON plan code=%d stderr=%q", code, errOut.String())
 	}
 	var result terran.PlanResult
-	if err := json.Unmarshal(out.Bytes(), &result); err != nil || len(result.Actions) != 1 || result.Actions[0].Kind != "instruction" || result.Actions[0].Target != "opencode-global" || result.Actions[0].Source == "" || result.Actions[0].Destination == "" {
-		t.Fatalf("instruction JSON missing fields: %#v %v", result, err)
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil || len(result.Actions) != 2 || result.Actions[0].Kind != "config" || result.Actions[0].Target != "opencode-config" || result.Actions[1].Kind != "instruction" || result.Actions[1].Target != "opencode-global" {
+		t.Fatalf("OpenCode managed-file JSON missing fields: %#v %v", result, err)
+	}
+	for _, action := range result.Actions {
+		if action.Source == "" || action.Destination == "" {
+			t.Fatalf("managed-file JSON missing paths: %#v", result)
+		}
 	}
 	out.Reset()
 	errOut.Reset()
 	if code := run([]string{"plan", "--target", "opencode"}, &out, &errOut); code != 0 {
 		t.Fatalf("human plan code=%d stderr=%q", code, errOut.String())
 	}
-	for _, want := range []string{"kind=instruction", "target=opencode-global", "source=", "destination=", "reason="} {
+	for _, want := range []string{"kind=config", "target=opencode-config", "kind=instruction", "target=opencode-global", "source=", "destination=", "reason="} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("human instruction output missing %q: %q", want, out.String())
 		}

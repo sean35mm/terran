@@ -29,6 +29,10 @@ func selectedInstruction(filter, target string) bool {
 	return filter == "all" || (filter == "claude" && target == "claude-global") || (filter == "opencode" && target == "opencode-global")
 }
 
+func selectedConfig(filter, target string) bool {
+	return filter == "all" || (filter == "opencode" && target == "opencode-config")
+}
+
 func LoadReceipt(paths Paths) (Receipt, error) {
 	var receipt Receipt
 	if err := readTrustedStateStrict(paths.Receipt, "receipt", &receipt, 4<<20); err != nil {
@@ -86,6 +90,33 @@ func LoadReceipt(paths Paths) (Receipt, error) {
 			return Receipt{}, fmt.Errorf("invalid instruction origin for %s", instruction.Target)
 		}
 	}
+	seen = map[string]bool{}
+	for _, stored := range receipt.Configs {
+		config := ReceiptInstruction(stored)
+		destination, err := configDestination(paths, config.Target)
+		if err != nil || config.Strategy != "copy" || !validHash(config.SourceHash) || !validHash(config.AppliedHash) {
+			return Receipt{}, fmt.Errorf("invalid receipt config")
+		}
+		if seen[config.Target] {
+			return Receipt{}, fmt.Errorf("duplicate receipt config")
+		}
+		seen[config.Target] = true
+		if config.Destination != destination || !filepath.IsAbs(config.Source) || filepath.Clean(config.Source) != config.Source || !contained(receipt.RepositoryPath, config.Source) {
+			return Receipt{}, fmt.Errorf("unsafe receipt config paths for %s", config.Target)
+		}
+		switch config.Origin {
+		case "created":
+			if config.OriginalHash != "" || config.OriginalMode != 0 || config.Backup != "" {
+				return Receipt{}, fmt.Errorf("invalid created config receipt for %s", config.Target)
+			}
+		case "adopted":
+			if !validHash(config.OriginalHash) || config.OriginalMode&0o022 != 0 || config.OriginalMode&^0o777 != 0 || config.Backup != instructionBackup(paths, config.Target) {
+				return Receipt{}, fmt.Errorf("invalid adopted config receipt for %s", config.Target)
+			}
+		default:
+			return Receipt{}, fmt.Errorf("invalid config origin for %s", config.Target)
+		}
+	}
 	return receipt, nil
 }
 
@@ -136,6 +167,10 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, filter string
 	for _, instruction := range receipt.Instructions {
 		ownedInstructions[instruction.Target] = instruction
 	}
+	ownedConfigs := map[string]ReceiptInstruction{}
+	for _, config := range receipt.Configs {
+		ownedConfigs[config.Target] = ReceiptInstruction(config)
+	}
 	desiredSkills := map[string]Action{}
 	for _, projection := range loaded.Manifest.Projections {
 		for _, target := range projection.Targets {
@@ -147,7 +182,7 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, filter string
 			desiredSkills[pairKey(projection.Skill, target)] = action
 		}
 	}
-	actions := make([]Action, 0, len(desiredSkills)+len(ownedSkills)+len(loaded.Manifest.Instructions)+len(ownedInstructions))
+	actions := make([]Action, 0, len(desiredSkills)+len(ownedSkills)+len(loaded.Manifest.Instructions)+len(ownedInstructions)+len(loaded.Manifest.Configs)+len(ownedConfigs))
 	for key, action := range desiredSkills {
 		prior, owned := ownedSkills[key]
 		action.Action, action.Reason = classifyLeaf(filepath.Dir(action.Destination), action.Destination, action.Source, prior, owned)
@@ -187,6 +222,30 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, filter string
 		}
 		destination, _ := instructionDestination(paths, prior.Target)
 		action := Action{Kind: "instruction", Target: prior.Target, Source: prior.Source, Destination: destination}
+		action.Action, action.Reason = classifyInstructionRemoval(paths, prior, destination)
+		actions = append(actions, action)
+	}
+	desiredConfigs := map[string]bool{}
+	for _, config := range loaded.Manifest.Configs {
+		if !selectedConfig(filter, config.Target) {
+			continue
+		}
+		desiredConfigs[config.Target] = true
+		destination, _ := configDestination(paths, config.Target)
+		if contained(loaded.Repository, destination) {
+			return PlanResult{}, fmt.Errorf("config destination for %s must not be inside the repository", config.Target)
+		}
+		action := Action{Kind: "config", Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination}
+		prior, owned := ownedConfigs[config.Target]
+		action.Action, action.Reason = classifyInstruction(paths, action, loaded.ConfigHashes[config.Target], prior, owned)
+		actions = append(actions, action)
+	}
+	for _, prior := range ownedConfigs {
+		if !selectedConfig(filter, prior.Target) || desiredConfigs[prior.Target] {
+			continue
+		}
+		destination, _ := configDestination(paths, prior.Target)
+		action := Action{Kind: "config", Target: prior.Target, Source: prior.Source, Destination: destination}
 		action.Action, action.Reason = classifyInstructionRemoval(paths, prior, destination)
 		actions = append(actions, action)
 	}
@@ -445,6 +504,9 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 		for _, instruction := range receipt.Instructions {
 			ownedInstructions[instruction.Target] = instruction
 		}
+		for _, config := range receipt.Configs {
+			ownedInstructions[config.Target] = ReceiptInstruction(config)
+		}
 		for _, action := range result.Actions {
 			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions); err != nil {
 				return err
@@ -467,7 +529,7 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 		var rollbacks []instructionRollback
 		verifiedInstructionHashes := map[string]string{}
 		for _, action := range result.Actions {
-			if action.Kind != "instruction" || action.Action == "noop" {
+			if action.Kind == "skill" || action.Action == "noop" {
 				continue
 			}
 			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions); err != nil {
@@ -479,8 +541,8 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 				}
 			}
 			var sourceBytes []byte
-			if expectedHash, desired := loaded.InstructionHashes[action.Target]; desired {
-				sourceBytes, err = readVerifiedInstructionSource(loaded.Repository, action.Source, expectedHash)
+			if expectedHash, desired := managedSourceHash(loaded, action.Kind, action.Target); desired {
+				sourceBytes, err = readVerifiedManagedSource(loaded.Repository, action.Kind, action.Source, expectedHash)
 				if err != nil {
 					rollbackErr := rollbackAll(rollbacks, skillRollbacks)
 					return errors.Join(err, rollbackErr)
@@ -505,6 +567,16 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 			}
 			verifiedInstructionHashes[instruction.Target] = hashBytes(data)
+		}
+		for _, config := range loaded.Manifest.Configs {
+			if !selectedConfig(target, config.Target) {
+				continue
+			}
+			data, err := readVerifiedManagedSource(loaded.Repository, "config", loaded.ConfigSources[config.Target], loaded.ConfigHashes[config.Target])
+			if err != nil {
+				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
+			}
+			verifiedInstructionHashes[config.Target] = hashBytes(data)
 		}
 		now := time.Now().UTC()
 		newReceipt := Receipt{SchemaVersion: SchemaVersion, RepositoryID: enrollment.RepositoryID, RepositoryPath: enrollment.RepositoryPath, RepositoryVersion: loaded.Manifest.Version, ManifestFingerprint: loaded.Fingerprint}
@@ -552,10 +624,41 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 			}
 			newReceipt.Instructions = append(newReceipt.Instructions, ReceiptInstruction{Target: instruction.Target, Source: loaded.InstructionSources[instruction.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
 		}
+		for _, old := range receipt.Configs {
+			if !selectedConfig(target, old.Target) {
+				newReceipt.Configs = append(newReceipt.Configs, old)
+			}
+		}
+		for _, config := range loaded.Manifest.Configs {
+			if !selectedConfig(target, config.Target) {
+				continue
+			}
+			prior, owned := ownedInstructions[config.Target]
+			origin := "created"
+			var originalHash, backup string
+			var originalMode uint32
+			if owned {
+				origin, originalHash, originalMode, backup = prior.Origin, prior.OriginalHash, prior.OriginalMode, prior.Backup
+			} else if actionFor(result, "config", config.Target).Action == "adopt" {
+				origin = "adopted"
+				destination, _ := configDestination(paths, config.Target)
+				info, _ := os.Stat(destination)
+				originalHash = loaded.ConfigHashes[config.Target]
+				originalMode = uint32(info.Mode().Perm())
+				backup = instructionBackup(paths, config.Target)
+			}
+			destination, _ := configDestination(paths, config.Target)
+			sourceHash := verifiedInstructionHashes[config.Target]
+			if sourceHash == "" {
+				sourceHash = loaded.ConfigHashes[config.Target]
+			}
+			newReceipt.Configs = append(newReceipt.Configs, ReceiptConfig{Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
+		}
 		sort.Slice(newReceipt.Projections, func(i, j int) bool {
 			return pairKey(newReceipt.Projections[i].Skill, newReceipt.Projections[i].Target) < pairKey(newReceipt.Projections[j].Skill, newReceipt.Projections[j].Target)
 		})
 		sort.Slice(newReceipt.Instructions, func(i, j int) bool { return newReceipt.Instructions[i].Target < newReceipt.Instructions[j].Target })
+		sort.Slice(newReceipt.Configs, func(i, j int) bool { return newReceipt.Configs[i].Target < newReceipt.Configs[j].Target })
 		priorReceipt, _, priorReceiptErr := readTrustedFile(paths.Receipt, "receipt", 4<<20, 0o600)
 		priorReceiptExisted := priorReceiptErr == nil
 		if priorReceiptErr != nil && !errors.Is(priorReceiptErr, os.ErrNotExist) {
@@ -591,7 +694,7 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 			}
 		}
 		for _, action := range result.Actions {
-			if action.Kind != "instruction" || action.Action != "restore" {
+			if action.Kind == "skill" || action.Action != "restore" {
 				continue
 			}
 			backup := instructionBackup(paths, action.Target)
@@ -633,6 +736,11 @@ func actionFor(plan PlanResult, kind, target string) Action {
 func receiptReferencesBackup(receipt Receipt, backup string) bool {
 	for _, instruction := range receipt.Instructions {
 		if instruction.Backup == backup {
+			return true
+		}
+	}
+	for _, config := range receipt.Configs {
+		if config.Backup == backup {
 			return true
 		}
 	}
@@ -724,14 +832,16 @@ func preflightAction(paths Paths, loaded LoadedManifest, action Action, ownedSki
 		}
 		return nil
 	}
-	if source, desired := loaded.InstructionSources[action.Target]; desired {
+	source, desired := managedSource(loaded, action.Kind, action.Target)
+	if desired {
 		if err := validateTrustedInstructionSource(loaded.Repository, source); err != nil {
 			return err
 		}
-		hash, err := fileHash(source)
-		if err != nil || hash != loaded.InstructionHashes[action.Target] {
-			return fmt.Errorf("instruction source changed during apply")
+		data, err := readVerifiedManagedSource(loaded.Repository, action.Kind, source, managedHash(loaded, action.Kind, action.Target))
+		if err != nil {
+			return fmt.Errorf("managed source changed during apply: %w", err)
 		}
+		hash := hashBytes(data)
 		prior, owned := ownedInstructions[action.Target]
 		fresh, _ := classifyInstruction(paths, action, hash, prior, owned)
 		if fresh != action.Action {
@@ -886,12 +996,15 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 	switch action.Action {
 	case "create", "update":
 		mode := os.FileMode(0o644)
+		if action.Kind == "config" {
+			mode = 0o600
+		}
 		if rollback.existed {
 			mode = rollback.mode
 		}
 		mutation, err := atomicInstructionFile(action.Destination, verifiedSource, mode, action.Action == "create")
 		if mutation.mutated {
-			rollback.afterHash = loaded.InstructionHashes[action.Target]
+			rollback.afterHash = managedHash(loaded, action.Kind, action.Target)
 			rollback.afterInfo = mutation.info
 		}
 		if err != nil {
@@ -922,6 +1035,10 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 }
 
 func readVerifiedInstructionSource(repository, source, expectedHash string) ([]byte, error) {
+	return readVerifiedManagedSource(repository, "instruction", source, expectedHash)
+}
+
+func readVerifiedManagedSource(repository, kind, source, expectedHash string) ([]byte, error) {
 	if err := validateTrustedInstructionSource(repository, source); err != nil {
 		return nil, err
 	}
@@ -933,9 +1050,35 @@ func readVerifiedInstructionSource(repository, source, expectedHash string) ([]b
 		return nil, err
 	}
 	if hashBytes(data) != expectedHash {
-		return nil, fmt.Errorf("instruction source changed during apply")
+		return nil, fmt.Errorf("managed source changed during apply")
+	}
+	if kind == "config" {
+		if err := validateOpenCodeConfig(data); err != nil {
+			return nil, fmt.Errorf("config source is unsafe: %w", err)
+		}
 	}
 	return data, nil
+}
+
+func managedSource(loaded LoadedManifest, kind, target string) (string, bool) {
+	if kind == "config" {
+		source, ok := loaded.ConfigSources[target]
+		return source, ok
+	}
+	source, ok := loaded.InstructionSources[target]
+	return source, ok
+}
+
+func managedHash(loaded LoadedManifest, kind, target string) string {
+	if kind == "config" {
+		return loaded.ConfigHashes[target]
+	}
+	return loaded.InstructionHashes[target]
+}
+
+func managedSourceHash(loaded LoadedManifest, kind, target string) (string, bool) {
+	_, ok := managedSource(loaded, kind, target)
+	return managedHash(loaded, kind, target), ok
 }
 
 func rollbackInstructions(rollbacks []instructionRollback) error {

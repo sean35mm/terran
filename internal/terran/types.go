@@ -10,6 +10,7 @@ type Manifest struct {
 	Version       string        `json:"version"`
 	Projections   []Projection  `json:"projections"`
 	Instructions  []Instruction `json:"instructions,omitempty"`
+	Configs       []Config      `json:"configs,omitempty"`
 }
 
 type Projection struct {
@@ -19,6 +20,11 @@ type Projection struct {
 }
 
 type Instruction struct {
+	Target string `json:"target"`
+	Source string `json:"source"`
+}
+
+type Config struct {
 	Target string `json:"target"`
 	Source string `json:"source"`
 }
@@ -39,6 +45,7 @@ type Receipt struct {
 	ManifestFingerprint string               `json:"manifest_fingerprint"`
 	Projections         []ReceiptProjection  `json:"projections"`
 	Instructions        []ReceiptInstruction `json:"instructions,omitempty"`
+	Configs             []ReceiptConfig      `json:"configs,omitempty"`
 }
 
 type ReceiptInstruction struct {
@@ -55,6 +62,8 @@ type ReceiptInstruction struct {
 	AppliedAt          time.Time `json:"applied_at"`
 	TerranBuildVersion string    `json:"terran_build_version"`
 }
+
+type ReceiptConfig ReceiptInstruction
 
 type ReceiptProjection struct {
 	Skill              string    `json:"skill"`

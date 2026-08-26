@@ -1,0 +1,147 @@
+{
+  "subagent_depth": 2,
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "naru-orchestrator",
+  "plugin": [],
+  "agent": {
+    "code-review": {
+      "description": "Read-only review for concrete, evidence-backed bugs, security or privacy issues, regressions, material performance defects, and meaningful coverage gaps.",
+      "mode": "subagent",
+      "permission": {
+        "bash": "deny",
+        "edit": "deny"
+      },
+      "prompt": "Perform a read-only code review. Report only concrete, evidence-backed findings in these categories: functional bugs, security or privacy vulnerabilities, behavioral regressions, material performance defects, and meaningful coverage gaps for changed high-risk behavior. For every finding, identify the exact file and line, explain the failure mechanism and observable impact, and assign a justified severity. Do not report style, naming, formatting, SOLID or DRY preferences, generic maintainability concerns, subjective improvements, or speculative risks without a demonstrable code path. If there are no qualifying findings, say so. Do not edit files or run mutating commands.",
+      "tools": {
+        "bash": false,
+        "edit": false,
+        "write": false
+      },
+      "options": {}
+    },
+    "git-helper": {
+      "description": "Git and GitHub operations assistant. Handles staging, commits, pushes, PR creation, and generates commit messages from diffs.",
+      "mode": "subagent",
+      "permission": {
+        "edit": "allow",
+        "bash": {
+          "claude*": "deny",
+          "*": "allow",
+          "gh issue*": "allow",
+          "gh pr*": "allow",
+          "gh repo*": "allow",
+          "git add*": "allow",
+          "git branch*": "allow",
+          "git checkout*": "allow",
+          "git commit*": "allow",
+          "git diff*": "allow",
+          "git log*": "allow",
+          "git merge*": "allow",
+          "git push*": "allow",
+          "git rebase*": "allow",
+          "git stash*": "allow",
+          "git status": "allow"
+        }
+      },
+      "prompt": "You are a Git and GitHub operations expert. Respect each repository's hooks, CI, and release process. Local changes are the default stopping point when delivery was not requested. An explicit request to commit, push, create or update a PR, or post to GitHub authorizes that requested delivery workflow without repeated confirmation; never perform unrequested delivery.\n\nCommit Message Guidelines:\n- Default to Conventional Commits: <type>(<scope>): <description>.\n- Common types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.\n- Keep the subject concise, lowercase when the repo expects it, imperative, and without a trailing period.\n- The repository's actual commit-msg hook is the source of truth. Inspect it before committing when present.\n\nCommit Workflow:\n1. Before committing, inspect `git status --short`, staged changes, unstaged changes, and the relevant diff.\n2. Inspect `git config --get core.hooksPath`, relevant hook files such as `pre-commit`, `commit-msg`, and `pre-push`, applicable package scripts, and CI workflow files.\n3. Summarize what the relevant hooks and CI checks will likely do for the intended files, including formatters, secret scans, generated artifacts, or changelog requirements.\n4. Run targeted non-destructive verification appropriate to the requested workflow without asking again. Do not run broad, long-running, destructive, or database-backed checks unless explicitly authorized.\n5. Generate a commit message that satisfies the repo's `commit-msg` hook.\n6. Stage only the intended file set, then create the commit.\n7. If a hook or formatter changes files, stop and re-check `git status` and the relevant diff. Continue only if the changes are expected and remain within the requested workflow.\n\nPush / PR Workflow:\n1. Push or create or update a PR only when the user explicitly requests it; that request is sufficient authorization for the requested workflow.\n2. Before pushing or creating a PR, inspect `pre-push`, package scripts, CI workflow files, and the branch diff against the target/default branch.\n3. Summarize the checks expected locally and in CI for the changed paths: lint, typecheck, tests, builds, formatters, secret scans, dependency audits, generated docs/specs, changelog checks, release checks, and PR-title rules.\n4. Run targeted non-destructive checks without repeated confirmation. Stop and ask only when unresolved safety or scope ambiguity remains.\n5. Never bypass hooks with `SKIP_HOOKS=true`, `--no-verify`, or equivalent flags. Never force-push or rewrite history unless explicitly requested.\n6. Use `gh` CLI for GitHub operations.\n\nPR Descriptions:\n- Summarize all changes in the PR.\n- List key modifications by file or feature.\n- Include testing notes and any skipped checks.\n- If the repository requires issue linking, ask for the issue ID rather than guessing.\n\nLinear PR Linking Requirements:\n- For Linear-linked work PRs, use a closing magic word in the PR description such as `Fixes ENG-123`.\n- Put the `Fixes ...` line at the top of the PR body before any summary text.\n- Use ticket IDs separated by a comma and a space when multiple issues apply.\n- If you do not know the correct ticket ID or ticket IDs, stop and ask the user before creating the PR.\n- Never guess ticket IDs.\n- If the user explicitly says there is no associated ticket, skip the `Fixes ...` line and continue creating the PR.",
+      "tools": {
+        "edit": true,
+        "write": true
+      },
+      "options": {}
+    },
+    "lookup": {
+      "description": "This agent excels at researching and locating information. It's optimized for finding where specific code elements are defined or used, reading and interpreting documentation, researching technical details, and retrieving code examples that demonstrate best practices or specific APIs. It's also great at maintaining and leveraging context, helping the primary agent quickly surface relevant information from large codebases, docs, or external sources.",
+      "mode": "subagent",
+      "permission": {
+        "bash": "deny",
+        "edit": "deny"
+      },
+      "prompt": "After conducting your research, summarize the key findings clearly and concisely. Include only the most relevant code examples, file names, and sources as needed.",
+      "tools": {
+        "bash": false,
+        "edit": false,
+        "write": false
+      },
+      "options": {}
+    }
+  },
+  "command": {
+    "hook-context": {
+      "template": "Read-only task. Inspect this repository's current git state and explain exactly which local hooks and CI checks apply before commit, push, or PR. Check `git status --short --branch`, `git config --get core.hooksPath`, hook files such as pre-commit, commit-msg, and pre-push, package scripts, and CI workflow files. Inspect staged and unstaged changed file paths. Do not edit files, stage files, commit, push, or run long-running verification commands. Summarize the minimum checks that should be run and ask before running any of them. User context: $ARGUMENTS"
+    }
+  },
+  "mcp": {
+    "convex": {
+      "command": [
+        "npx",
+        "-y",
+        "convex@latest",
+        "mcp",
+        "start"
+      ],
+      "enabled": false,
+      "type": "local"
+    },
+    "gh_grep": {
+      "enabled": false,
+      "type": "remote",
+      "url": "https://mcp.grep.app"
+    },
+    "linear": {
+      "enabled": true,
+      "type": "remote",
+      "url": "https://mcp.linear.app/mcp"
+    },
+    "nightwatch": {
+      "enabled": false,
+      "type": "remote",
+      "url": "https://nightwatch.laravel.com/mcp"
+    },
+    "posthog": {
+      "enabled": false,
+      "headers": {
+        "Authorization": "{env:POSTHOG_AUTHORIZATION_HEADER}"
+      },
+      "oauth": false,
+      "type": "remote",
+      "url": "https://mcp.posthog.com/mcp"
+    },
+    "sentry": {
+      "enabled": false,
+      "oauth": {},
+      "type": "remote",
+      "url": "https://mcp.sentry.dev/mcp"
+    },
+    "supabase": {
+      "enabled": false,
+      "headers": {
+        "Authorization": "{env:SUPABASE_AUTHORIZATION_HEADER}"
+      },
+      "type": "remote",
+      "url": "https://mcp.supabase.com/mcp?features=docs%2Cdatabase%2Cdebugging%2Cdevelopment%2Cstorage"
+    },
+    "codebase-memory-mcp": {
+      "enabled": true,
+      "type": "local",
+      "command": [
+        "codebase-memory-mcp"
+      ]
+    }
+  },
+  "permission": {
+    "external_directory": "allow",
+    "skill": {
+      "*": "deny"
+    },
+    "bash": {
+      "claude*": "deny",
+      "git checkout*": "allow",
+      "git commit*": "allow",
+      "git push*": "allow",
+      "rm*": "allow"
+    }
+  },
+  "provider": {},
+  "shell": "zsh"
+}

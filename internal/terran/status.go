@@ -116,44 +116,28 @@ func Doctor(buildVersion string) DoctorResult {
 	}
 	if receipt, err := LoadReceipt(paths); errors.Is(err, os.ErrNotExist) {
 		add("instruction_receipt", "warn", "no instruction receipt exists yet")
+		add("config_receipt", "warn", "no config receipt exists yet")
 	} else if err != nil {
 		add("instruction_receipt", "fail", err.Error())
+		add("config_receipt", "fail", err.Error())
 	} else {
 		instructionHealthy := true
 		for _, instruction := range receipt.Instructions {
-			destination, destinationErr := instructionDestination(paths, instruction.Target)
-			if destinationErr != nil || destination != instruction.Destination || contained(enrollment.RepositoryPath, destination) {
-				add("instruction_"+instruction.Target, "fail", "fixed instruction destination is invalid")
+			if !doctorManagedFile(paths, enrollment, "instruction", instruction, add) {
 				instructionHealthy = false
-				continue
 			}
-			if err := validateInstructionParent(destination); err != nil {
-				add("instruction_"+instruction.Target, "fail", err.Error())
-				instructionHealthy = false
-				continue
-			}
-			if err := validateTrustedFile(destination, "managed instruction"); err != nil {
-				add("instruction_"+instruction.Target, "fail", err.Error())
-				instructionHealthy = false
-				continue
-			}
-			hash, err := fileHash(destination)
-			if err != nil || hash != instruction.AppliedHash {
-				add("instruction_"+instruction.Target, "fail", "managed instruction hash mismatch")
-				instructionHealthy = false
-				continue
-			}
-			if instruction.Origin == "adopted" {
-				if err := validateBackup(paths, instruction); err != nil {
-					add("instruction_"+instruction.Target, "fail", err.Error())
-					instructionHealthy = false
-					continue
-				}
-			}
-			add("instruction_"+instruction.Target, "ok", destination+" is clean")
 		}
 		if instructionHealthy {
 			add("instruction_receipt", "ok", "instruction receipt paths, hashes, modes, and backups are valid")
+		}
+		configHealthy := true
+		for _, stored := range receipt.Configs {
+			if !doctorManagedFile(paths, enrollment, "config", ReceiptInstruction(stored), add) {
+				configHealthy = false
+			}
+		}
+		if configHealthy {
+			add("config_receipt", "ok", "config receipt paths, hashes, modes, and backups are valid")
 		}
 	}
 	status, err := Status("all")
@@ -178,6 +162,36 @@ func Doctor(buildVersion string) DoctorResult {
 		}
 	}
 	return result
+}
+
+func doctorManagedFile(paths Paths, enrollment Enrollment, kind string, managed ReceiptInstruction, add func(string, string, string)) bool {
+	name := kind + "_" + managed.Target
+	destination, destinationErr := managedFileDestination(paths, kind, managed.Target)
+	if destinationErr != nil || destination != managed.Destination || contained(enrollment.RepositoryPath, destination) {
+		add(name, "fail", "fixed "+kind+" destination is invalid")
+		return false
+	}
+	if err := validateInstructionParent(destination); err != nil {
+		add(name, "fail", err.Error())
+		return false
+	}
+	if err := validateTrustedFile(destination, "managed "+kind); err != nil {
+		add(name, "fail", err.Error())
+		return false
+	}
+	hash, err := fileHash(destination)
+	if err != nil || hash != managed.AppliedHash {
+		add(name, "fail", "managed "+kind+" hash mismatch")
+		return false
+	}
+	if managed.Origin == "adopted" {
+		if err := validateBackup(paths, managed); err != nil {
+			add(name, "fail", err.Error())
+			return false
+		}
+	}
+	add(name, "ok", destination+" is clean")
+	return true
 }
 
 func validateTrustedStateFile(path, description string) error {

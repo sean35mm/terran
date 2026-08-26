@@ -25,6 +25,8 @@ type LoadedManifest struct {
 	Sources            map[string]string
 	InstructionSources map[string]string
 	InstructionHashes  map[string]string
+	ConfigSources      map[string]string
+	ConfigHashes       map[string]string
 }
 
 func LoadManifest(repo string) (LoadedManifest, error) {
@@ -62,6 +64,8 @@ func LoadManifest(repo string) (LoadedManifest, error) {
 	sources := make(map[string]string)
 	instructionSources := make(map[string]string)
 	instructionHashes := make(map[string]string)
+	configSources := make(map[string]string)
+	configHashes := make(map[string]string)
 	pairs := make(map[string]bool)
 	for i := range manifest.Projections {
 		p := &manifest.Projections[i]
@@ -153,9 +157,43 @@ func LoadManifest(repo string) (LoadedManifest, error) {
 		instructionHashes[instruction.Target] = hex.EncodeToString(sum[:])
 	}
 	sort.Slice(manifest.Instructions, func(i, j int) bool { return manifest.Instructions[i].Target < manifest.Instructions[j].Target })
+	for i := range manifest.Configs {
+		config := &manifest.Configs[i]
+		if config.Target != "opencode-config" {
+			return LoadedManifest{}, fmt.Errorf("unsupported config target %q", config.Target)
+		}
+		if _, exists := configSources[config.Target]; exists {
+			return LoadedManifest{}, fmt.Errorf("duplicate config target %q", config.Target)
+		}
+		if config.Source == "" || filepath.IsAbs(config.Source) || filepath.Clean(config.Source) != config.Source || config.Source == "." || strings.HasPrefix(config.Source, ".."+string(filepath.Separator)) {
+			return LoadedManifest{}, fmt.Errorf("source for %s must be a clean relative path", config.Target)
+		}
+		sourcePath := filepath.Join(canonicalRepo, config.Source)
+		canonicalSource, err := filepath.EvalSymlinks(sourcePath)
+		if err != nil || canonicalSource != sourcePath || !contained(canonicalRepo, canonicalSource) {
+			return LoadedManifest{}, fmt.Errorf("source for %s is missing or escapes repository", config.Target)
+		}
+		if err := validateTrustedInstructionSource(canonicalRepo, canonicalSource); err != nil {
+			return LoadedManifest{}, fmt.Errorf("source for %s: %w", config.Target, err)
+		}
+		data, err := os.ReadFile(canonicalSource)
+		if err != nil {
+			return LoadedManifest{}, fmt.Errorf("source for %s: %w", config.Target, err)
+		}
+		if len(data) > instructionLimit {
+			return LoadedManifest{}, fmt.Errorf("source for %s exceeds %d bytes", config.Target, instructionLimit)
+		}
+		if err := validateOpenCodeConfig(data); err != nil {
+			return LoadedManifest{}, fmt.Errorf("source for %s: %w", config.Target, err)
+		}
+		sum := sha256.Sum256(data)
+		configSources[config.Target] = canonicalSource
+		configHashes[config.Target] = hex.EncodeToString(sum[:])
+	}
+	sort.Slice(manifest.Configs, func(i, j int) bool { return manifest.Configs[i].Target < manifest.Configs[j].Target })
 	normalized, _ := json.Marshal(manifest)
 	sum := sha256.Sum256(normalized)
-	return LoadedManifest{manifest, canonicalRepo, hex.EncodeToString(sum[:]), sources, instructionSources, instructionHashes}, nil
+	return LoadedManifest{manifest, canonicalRepo, hex.EncodeToString(sum[:]), sources, instructionSources, instructionHashes, configSources, configHashes}, nil
 }
 
 func revalidateLoadedManifest(expected LoadedManifest) error {

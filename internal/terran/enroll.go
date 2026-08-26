@@ -59,8 +59,8 @@ func Enroll(repo, name string, replace bool) (Enrollment, bool, error) {
 				return fmt.Errorf("a different repository is enrolled; use --replace")
 			}
 			receipt, receiptErr := LoadReceipt(paths)
-			if receiptErr == nil && (len(receipt.Projections) != 0 || len(receipt.Instructions) != 0) {
-				return fmt.Errorf("cannot replace enrollment while managed skills or instructions remain; decommission them or migrate ownership first")
+			if receiptErr == nil && (len(receipt.Projections) != 0 || len(receipt.Instructions) != 0 || len(receipt.Configs) != 0) {
+				return fmt.Errorf("cannot replace enrollment while managed skills, instructions, or configs remain; decommission them or migrate ownership first")
 			}
 			if receiptErr != nil && !errors.Is(receiptErr, os.ErrNotExist) {
 				return fmt.Errorf("read receipt before replacement: %w", receiptErr)
@@ -123,8 +123,8 @@ func retireEmptyReceipt(paths Paths) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("validate empty receipt before replacement: %w", err)
 	}
-	if len(receipt.Projections) != 0 || len(receipt.Instructions) != 0 {
-		return "", fmt.Errorf("cannot replace enrollment while managed skills or instructions remain; decommission them or migrate ownership first")
+	if len(receipt.Projections) != 0 || len(receipt.Instructions) != 0 || len(receipt.Configs) != 0 {
+		return "", fmt.Errorf("cannot replace enrollment while managed skills, instructions, or configs remain; decommission them or migrate ownership first")
 	}
 	if err := validateTrustedStateFile(paths.Receipt, "receipt.json"); err != nil {
 		return "", err
