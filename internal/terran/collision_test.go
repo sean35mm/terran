@@ -192,6 +192,93 @@ func TestInteractiveAbortAndIneligibleCollisionsNeverMutate(t *testing.T) {
 	})
 }
 
+func TestLockedPlanConfirmationRunsAfterChoicesBeforeMutation(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global")
+	prepareInstructionParents(t)
+	paths, _ := ResolvePaths()
+	destination, _ := instructionDestination(paths, "claude-global")
+	original := []byte("user original")
+	if err := os.WriteFile(destination, original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", false); err != nil {
+		t.Fatal(err)
+	}
+	order := []string{}
+	_, err := ApplyWithOptions("claude", "test", ApplyOptions{
+		ResolveCollision: func(Action) (CollisionDecision, error) {
+			order = append(order, "collision")
+			return CollisionReplace, nil
+		},
+		ConfirmPlan: func(plan PlanResult) error {
+			order = append(order, "confirm")
+			if got := actionFor(plan, "instruction", "claude-global").Action; got != "replace" {
+				t.Fatalf("confirmation did not receive resolved locked plan: %#v", plan)
+			}
+			return ErrApplyAborted
+		},
+	})
+	if !errors.Is(err, ErrApplyAborted) || strings.Join(order, ",") != "collision,confirm" {
+		t.Fatalf("callback order=%v err=%v", order, err)
+	}
+	if got, readErr := os.ReadFile(destination); readErr != nil || !bytes.Equal(got, original) {
+		t.Fatalf("canceled confirmation changed destination: %q %v", got, readErr)
+	}
+	for _, path := range []string{paths.Receipt, instructionBackup(paths, "claude-global")} {
+		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("canceled confirmation created %s: %v", path, statErr)
+		}
+	}
+}
+
+func TestLockedPlanChangeAfterConfirmationFailsBeforeMutation(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global")
+	prepareInstructionParents(t)
+	paths, _ := ResolvePaths()
+	destination, _ := instructionDestination(paths, "claude-global")
+	if _, _, err := Enroll(repo, "test", false); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := false
+	_, err := ApplyWithOptions("claude", "test", ApplyOptions{ConfirmPlan: func(plan PlanResult) error {
+		confirmed = true
+		if actionFor(plan, "instruction", "claude-global").Action != "create" {
+			t.Fatalf("unexpected locked plan: %#v", plan)
+		}
+		return os.WriteFile(filepath.Join(repo, "instructions", "claude-global.md"), []byte("changed after display"), 0o644)
+	}})
+	if err == nil || !confirmed || !strings.Contains(err.Error(), "changed during apply") {
+		t.Fatalf("changed exact plan was accepted: confirmed=%v err=%v", confirmed, err)
+	}
+	if _, statErr := os.Lstat(destination); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("changed exact plan mutated destination: %v", statErr)
+	}
+	if _, statErr := os.Lstat(paths.Receipt); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("changed exact plan wrote receipt: %v", statErr)
+	}
+}
+
+func TestLockedPlanConfirmationNotCalledForUnresolvedBlock(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global")
+	prepareInstructionParents(t)
+	paths, _ := ResolvePaths()
+	destination, _ := instructionDestination(paths, "claude-global")
+	if err := os.Mkdir(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", false); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	result, err := ApplyWithOptions("claude", "test", ApplyOptions{ConfirmPlan: func(PlanResult) error {
+		called = true
+		return nil
+	}})
+	if err != nil || called || !blocked(result) {
+		t.Fatalf("blocked plan confirmation: called=%v result=%#v err=%v", called, result, err)
+	}
+}
+
 func TestInteractiveDecisionRaceFailsBeforeMutation(t *testing.T) {
 	_, repo := instructionEnvironment(t, "claude-global", "opencode-global")
 	prepareInstructionParents(t)

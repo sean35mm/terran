@@ -26,6 +26,25 @@ func LoadEnrollment(paths Paths) (Enrollment, error) {
 	return enrollment, nil
 }
 
+// EnrollmentMissing distinguishes an absent enrollment from an unsafe or
+// malformed enrollment path without creating state.
+func EnrollmentMissing(paths Paths) (bool, error) {
+	if _, err := os.Lstat(paths.ConfigFile); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if _, err := os.Lstat(paths.ConfigDir); errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	} else if err != nil {
+		return false, err
+	}
+	if err := validateTrustedDirectory(paths.ConfigDir, "enrollment directory"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func Enroll(repo, name string, replace bool) (Enrollment, bool, error) {
 	paths, err := ResolvePaths()
 	if err != nil {

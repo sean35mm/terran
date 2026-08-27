@@ -15,13 +15,38 @@ installation from a reviewed source revision is always available. For tags that
 publish `install.sh`, platform archives, and `SHA256SUMS`, verified release
 installation is also available.
 
+## Quick start
+
+From the trusted local catalog checkout, run one command in a terminal:
+
+```sh
+cd "$HOME/src/terran"
+terran
+```
+
+On first run, Terran offers the current directory when it contains `terran.json`,
+or asks for a local path. Relative paths and `~` are accepted and canonicalized.
+Terran validates and summarizes the catalog before a default-No trust decision.
+It does not search the machine, clone, or fetch. Enrollment alone creates no
+projections. The guided flow groups pending work as Skills, Global instructions,
+and Global configuration; `d` shows full paths and reasons, `a` proceeds, and
+blank, EOF, or `q` quits. A second default-No confirmation approves the exact plan
+while Terran holds its apply lock. A clean returning run reports that everything
+is up to date without rewriting the receipt.
+
+On this catalog, a fresh fully selected plan contains 15 items: 12 skill
+projections (six skills across two roots), two global instruction copies, and one
+global config copy. Inspect every source, destination, action, and reason before
+apply. Bare `terran` is for humans in a real terminal. Bare non-TTY use prints
+help and never mutates.
+
 ## Contents
 
+- [Quick start](#quick-start)
 - [What Terran manages](#what-terran-manages)
 - [Platforms and prerequisites](#platforms-and-prerequisites)
 - [How it works](#how-it-works)
 - [Install](#install)
-- [Quick start](#quick-start)
 - [Plan, status, and doctor](#plan-status-and-doctor)
 - [Customize a fork](#customize-a-fork)
 - [Update](#update)
@@ -79,8 +104,10 @@ catalog. The release installer requires POSIX `sh`, `curl`, `tar`, and either
 
 ## How it works
 
-`terran enroll` records one trusted local repository and a user-facing Command
-Center name. `terran plan` strictly validates the catalog, sources, fixed targets,
+For a human at a terminal, bare `terran` guides enrollment, review, final consent,
+application, and verification without searching for or fetching a catalog.
+Advanced `terran enroll` records one trusted local repository and a user-facing
+Command Center name. `terran plan` strictly validates the catalog, sources, fixed targets,
 existing receipt, permissions, ownership, links, and needed file hashes. An
 unchanged adopted target may plan `noop` without reading its backup; `doctor`
 validates every adoption backup, while decommission/restore planning validates the
@@ -96,7 +123,7 @@ instruction IDs, and the fixed `opencode-config` config ID:
 {
   "schema_version": 1,
   "id": "terran-default",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "configs": [
     {"target": "opencode-config", "source": "config/opencode/opencode.json"}
   ],
@@ -128,13 +155,13 @@ From a trusted checkout:
 cd /absolute/path/to/terran
 mkdir -p .local "$HOME/.local/bin"
 go test -count=1 ./...
-go build -trimpath -ldflags '-X main.version=0.1.1-dev' -o .local/terran ./cmd/terran
+go build -trimpath -ldflags '-X main.version=0.2.0-dev' -o .local/terran ./cmd/terran
 install -m 0755 .local/terran "$HOME/.local/bin/terran"
 ```
 
 Source builds report a development version. `terran doctor` may warn when the
-binary version does not exactly match the catalog release; a `0.1.1-dev` build is
-recognized as compatible with catalog `0.1.1`.
+binary version does not exactly match the catalog release; a `0.2.0-dev` build is
+recognized as compatible with catalog `0.2.0`.
 
 ### Clone and build
 
@@ -145,7 +172,7 @@ git clone https://github.com/sean35mm/terran "$HOME/src/terran"
 cd "$HOME/src/terran"
 mkdir -p .local "$HOME/.local/bin"
 go test -count=1 ./...
-go build -trimpath -ldflags '-X main.version=0.1.1-dev' -o .local/terran ./cmd/terran
+go build -trimpath -ldflags '-X main.version=0.2.0-dev' -o .local/terran ./cmd/terran
 install -m 0755 .local/terran "$HOME/.local/bin/terran"
 ```
 
@@ -159,37 +186,14 @@ file—do not use a curl-pipe-only install:
 
 ```sh
 less install.sh
-sh install.sh v0.1.0
+sh install.sh v0.2.0
 ```
 
-Use `sh install.sh v0.1.0 "$HOME/bin"` for another absolute destination. The
+Use `sh install.sh v0.2.0 "$HOME/bin"` for another absolute destination. The
 installer downloads the pinned archive and `SHA256SUMS` over HTTPS, requires one
 exact checksum entry, verifies it, and atomically installs without `sudo`.
 Release checksums detect corruption or mismatch; they do not protect against a
 compromised publisher account or compromised release assets.
-
-## Quick start
-
-Choose a meaningful, user-approved Command Center name and enroll the exact local
-catalog path:
-
-```sh
-terran version
-terran enroll --repo "$HOME/src/terran" --name personal-command-center
-terran plan
-terran apply
-terran status
-terran doctor
-```
-
-Enrollment alone creates no projections. `--replace` is required when changing
-an existing enrollment to a different repository and should be used only when
-that replacement is intentional.
-
-On this catalog, a fresh fully selected plan contains 15 items: 12 skill
-projections (six skills across two roots), two global instruction copies, and one
-global config copy.
-Inspect every source, destination, action, and reason before apply.
 
 ## Plan, status, and doctor
 
@@ -199,8 +203,9 @@ Inspect every source, destination, action, and reason before apply.
 something different or unsafe. `blocked_drift` means receipt-owned content,
 metadata, or an adoption backup no longer matches.
 
-On an actual human terminal, `terran apply` may also report `skip` for a safe
-differing unowned instruction or config file the user chose to keep. That item
+On an actual human terminal, guided `terran` or advanced `terran apply` may also
+report `skip` for a safe differing unowned instruction or config file the user
+chose to keep. That item
 remains an unowned collision in later plan and status output.
 
 Use target filters when needed:
@@ -265,8 +270,8 @@ may prompt for a differing unowned instruction or config file whose parent,
 ownership, mode, link count, type, and backup destination are all safe. The user
 can replace it with Terran's complete file while preserving the original in a
 private mode-0600 backup, keep it unowned and continue other safe actions, or
-abort before any mutation. All answers and state are revalidated before the first
-change. Empty input or EOF aborts. `plan`, `status`, `--json`, non-TTY automation,
+quit before any mutation. All answers and state are revalidated before the first
+change. Empty input or EOF quits. `plan`, `status`, `--json`, non-TTY automation,
 receipt-owned drift, skills, symlinks, hard links, directories, devices, and
 unsafe files or parents never prompt and remain blocked. Adoption of an exact
 file leaves the active inode, bytes, mode, and mtime untouched and stores the
@@ -360,6 +365,7 @@ sharing output, especially JSON.
 ## CLI reference
 
 ```text
+terran
 terran help [command]
 terran version [--json]
 terran enroll --repo PATH [--name NAME] [--replace] [--json]
@@ -369,11 +375,13 @@ terran status [--target all|claude|agents|opencode] [--json]
 terran doctor [--json]
 ```
 
+Bare `terran` launches the guided workflow only when stdin, stdout, and stderr are
+all real terminals; if any is non-terminal or redirected, it prints help only.
 Human output goes to stdout and diagnostics and interactive prompts to stderr.
 JSON mode emits one object
 with `schema_version: 1`. Plan and status items include `kind`, stable `target`,
 source, destination, action/status, and reason/detail. Exit codes are 0 for
-success, 1 for user-aborted apply, operational failure, or non-clean
+success, 1 for user-quit apply, operational failure, or non-clean
 health/status, 2 for usage, and 3 for blocked collision or drift in plan/apply.
 
 ## For AI agents
@@ -395,14 +403,15 @@ enroll, update, customize, diagnose, or remove Terran:
    pinned release. Inspect a downloaded installer before running it; do not rely
    on a curl-to-shell-only command. A source build may report `dev`, and `doctor`
    may warn about development version metadata.
-5. Ask for or confirm a user-approved Command Center name, then run
+5. Continue to use deterministic advanced commands rather than the human wizard.
+   Ask for or confirm a user-approved Command Center name, then run
    `terran enroll --repo PATH --name NAME`. Use `--replace` only when the user
    explicitly intends to replace a different enrolled repository.
 6. Run `terran plan` before every apply. Inspect every item—not just blocks—for
    kind, source, destination, action, and reason. Remember a normal full enrollment
    of this catalog has 15 items.
 7. Stop on drift and ineligible collisions. A human terminal apply may offer its
-   bounded replace/keep/abort prompt for a safe unowned instruction or config
+   bounded replace/keep/quit prompt for a safe unowned instruction or config
    file; otherwise never delete, move, rename, overwrite, or “back up” unrelated
    content yourself to clear a destination.
 8. After apply, run `terran status` and `terran doctor`. Redact private absolute

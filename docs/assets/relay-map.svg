@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 72" role="img" aria-labelledby="relay-title relay-desc" shape-rendering="crispEdges">
+  <title id="relay-title">Catalog Relay Survey</title>
+  <desc id="relay-desc">A catalog beacon routes skills, instructions, and configuration toward a verified receipt marker across sparse stepped terrain.</desc>
+  <rect width="96" height="72" fill="#171611"/>
+  <g fill="#26231b">
+    <path d="M0 58h9v-3h9v2h11v-4h8v19H0zM64 60h7v-4h8v3h9v-5h8v18H64z"/>
+    <path d="M5 13h1v1H5zM82 8h1v1h-1zM89 27h1v1h-1zM54 64h1v1h-1zM34 9h1v1h-1z"/>
+  </g>
+  <g fill="none" stroke="#6b624e" stroke-width="1">
+    <path d="M18 36h18V20h21"/>
+    <path d="M18 36h39"/>
+    <path d="M18 36h18v16h21"/>
+  </g>
+  <g fill="#d49a43">
+    <path d="M13 27h10v2H13zm2-3h6v3h-6zm1-3h4v3h-4zm1-4h2v4h-2zM11 29h14v14H11z"/>
+    <path d="M57 18h4v4h-4zm0 16h4v4h-4zm0 16h4v4h-4z"/>
+    <path d="M76 32h7v7h-7z"/>
+  </g>
+  <g fill="#171611">
+    <path d="M14 32h8v8h-8zm2-13h2v2h-2zM58 19h2v2h-2zm0 16h2v2h-2zm0 16h2v2h-2zM78 34h3v3h-3z"/>
+  </g>
+  <g fill="#e7ddc5">
+    <path d="M17 33h2v6h-2zm-2 2h6v2h-6zM78 30h3v2h-3zm0 9h3v2h-3z"/>
+  </g>
+  <g fill="#8d846f">
+    <path d="M62 20h7v1h-7zm0 16h11v1H62zm0 16h8v1h-8zM83 35h7v1h-7z"/>
+  </g>
+</svg>

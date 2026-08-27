@@ -99,11 +99,11 @@ const (
 	CollisionAbort   CollisionDecision = "abort"
 )
 
-// ApplyOptions enables explicit resolution of only the safe unowned managed-file
-// collisions selected by ApplyWithOptions. The resolver receives paths and
-// metadata, never either file's contents.
+// ApplyOptions enables human decisions inside ApplyWithOptions' lock. Callbacks
+// receive plan metadata, never file contents.
 type ApplyOptions struct {
 	ResolveCollision func(Action) (CollisionDecision, error)
+	ConfirmPlan      func(PlanResult) error
 }
 
 type StatusItem struct {

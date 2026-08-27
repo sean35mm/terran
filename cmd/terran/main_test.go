@@ -30,6 +30,26 @@ func (w *failOnWriteWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
+func TestGuidedModeRequiresAllTerminalStreams(t *testing.T) {
+	terminal := map[*os.File]bool{os.Stdin: true, os.Stdout: false, os.Stderr: true}
+	isTerminal := func(file *os.File) bool { return terminal[file] }
+	if guidedTerminalStreams(os.Stdin, os.Stdout, os.Stderr, isTerminal) {
+		t.Fatal("redirected stdout enabled guided prompting")
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runWithIO(nil, strings.NewReader("y\n"), &stdout, &stderr, guidedTerminalStreams(os.Stdin, os.Stdout, os.Stderr, isTerminal)); code != 0 {
+		t.Fatalf("help-only code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Start here:") || stderr.Len() != 0 {
+		t.Fatalf("redirected stdout was not help-only: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	terminal[os.Stdout] = true
+	if !guidedTerminalStreams(os.Stdin, os.Stdout, os.Stderr, isTerminal) {
+		t.Fatal("three terminal streams did not enable guided mode")
+	}
+}
+
 func TestHelpVersionJSONAndUsage(t *testing.T) {
 	oldVersion, oldCommit, oldDate := version, commit, date
 	version, commit, date = "0.1.0-test", "abc", "today"
@@ -267,11 +287,11 @@ func TestCLIInteractiveCollisionChoicesAndPromptStreams(t *testing.T) {
 	}{
 		{name: "replace", input: "RePlAcE\n", wantCode: 0, wantAction: "replace", wantInstalled: true},
 		{name: "keep", input: "k\n", wantCode: 0, wantAction: "skip"},
-		{name: "abort", input: "a\n", wantCode: 1},
+		{name: "quit", input: "q\n", wantCode: 1},
 		{name: "invalid reprompt", input: "nope\nkeep\n", wantCode: 0, wantAction: "skip", wantInvalid: true},
 		{name: "empty", input: "\n", wantCode: 1},
 		{name: "EOF", input: "", wantCode: 1},
-		{name: "overlong", input: strings.Repeat("x", 256) + "\n", wantCode: 1, wantReadError: true},
+		{name: "overlong", input: strings.Repeat("x", promptInputLimit+1) + "\n", wantCode: 1, wantReadError: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -281,7 +301,7 @@ func TestCLIInteractiveCollisionChoicesAndPromptStreams(t *testing.T) {
 			if code != tc.wantCode {
 				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "private restoration backup") || strings.Contains(stdout.String(), "private restoration backup") {
+			if !strings.Contains(stderr.String(), "Existing config opencode-config differs") || strings.Contains(stdout.String(), "Existing config opencode-config differs") {
 				t.Fatalf("prompt stream separation failed: stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
 			if strings.Contains(stderr.String(), destination) {
@@ -342,7 +362,7 @@ func TestCLINoninteractiveAndJSONNeverPrompt(t *testing.T) {
 			if code := runWithIO(tc.args, strings.NewReader("replace\n"), &stdout, &stderr, tc.interactive); code != 3 {
 				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
-			if strings.Contains(stderr.String(), "private restoration backup") {
+			if strings.Contains(stderr.String(), "Existing config opencode-config differs") {
 				t.Fatalf("unexpected prompt: %q", stderr.String())
 			}
 			if got, _ := os.ReadFile(destination); !bytes.Equal(got, original) {

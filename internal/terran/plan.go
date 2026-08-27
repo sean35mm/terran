@@ -552,6 +552,11 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		if blocked(result) {
 			return nil
 		}
+		if options.ConfirmPlan != nil {
+			if err := options.ConfirmPlan(result); err != nil {
+				return fmt.Errorf("confirm plan: %w", err)
+			}
+		}
 		if err := revalidateLoadedManifest(loaded); err != nil {
 			return fmt.Errorf("revalidate catalog: %w", err)
 		}
@@ -793,6 +798,28 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		return nil
 	})
 	return result, err
+}
+
+// CanResolveCollision reports whether an action from Plan is currently eligible
+// for ApplyWithOptions' narrowly scoped managed-file collision prompt.
+func CanResolveCollision(action Action) (bool, error) {
+	paths, err := ResolvePaths()
+	if err != nil {
+		return false, err
+	}
+	enrollment, err := LoadEnrollment(paths)
+	if err != nil {
+		return false, err
+	}
+	loaded, err := LoadManifest(enrollment.RepositoryPath)
+	if err != nil {
+		return false, err
+	}
+	if loaded.Manifest.ID != enrollment.RepositoryID {
+		return false, fmt.Errorf("enrolled repository id changed")
+	}
+	_, eligible := resolvableCollision(paths, loaded, action)
+	return eligible, nil
 }
 
 func appendReceiptWarning(plan *PlanResult, warning string) {

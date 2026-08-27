@@ -2,11 +2,12 @@
 
 All notable changes are documented here. Terran follows semantic versioning.
 
-## 0.1.1 - Unreleased
+## 0.2.0 - 2026-08-27
 
 - Add strict, fixed-target whole-file management for a sanitized global OpenCode `opencode.json`, with distinct config receipts and the same collision, drift, adoption, backup, restoration, status, doctor, and rollback guarantees as global instructions.
 - Preserve Naru agent selection without treating Naru as an npm plugin or coupling its separately managed version to Terran's catalog version.
-- Add terminal-only replace/keep/abort resolution for safely backable unowned instruction and config collisions, with adopted restoration metadata, all-decisions preflight, and fail-closed noninteractive behavior.
+- Add terminal-only replace/keep/quit resolution for safely backable unowned instruction and config collisions, with adopted restoration metadata, all-decisions preflight, and fail-closed noninteractive behavior.
+- Add a state-aware guided workflow for humans running bare `terran`, with trusted local catalog enrollment, grouped review, locked final confirmation, and post-apply verification while preserving deterministic advanced and JSON commands.
 
 ## 0.1.0 - Initial release
 

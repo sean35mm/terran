@@ -51,7 +51,7 @@ chmod 0755 "$fake/curl" "$fake/shasum" "$fake/tar"
 
 run_reject() {
   destination=$1
-  if PATH="$fake:/usr/bin:/bin" sh "$root/install.sh" v0.1.0 "$destination" >"$tmp/stdout" 2>"$tmp/stderr"; then
+  if PATH="$fake:/usr/bin:/bin" sh "$root/install.sh" v0.2.0 "$destination" >"$tmp/stdout" 2>"$tmp/stderr"; then
     printf '%s\n' "installer accepted unsafe leaf: $destination" >&2
     exit 1
   fi
@@ -83,5 +83,5 @@ destination="$tmp/regular"
 mkdir "$destination"
 printf '%s\n' old > "$destination/terran"
 chmod 0755 "$destination/terran"
-PATH="$fake:/usr/bin:/bin" sh "$root/install.sh" v0.1.0 "$destination" >/dev/null
+PATH="$fake:/usr/bin:/bin" sh "$root/install.sh" v0.2.0 "$destination" >/dev/null
 [ "$(cat "$destination/terran")" = binary ]

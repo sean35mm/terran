@@ -18,14 +18,40 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: false
-      - name: Verify stable tag and catalog version
+      - name: Verify release metadata
         run: |
+          set -euo pipefail
           [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           test "$GITHUB_REF_NAME" = "v$(python3 -c 'import json; print(json.load(open("terran.json"))["version"])')"
+          python3 - "${GITHUB_REF_NAME#v}" <<'PY'
+          import datetime
+          import pathlib
+          import re
+          import sys
+
+          version = re.escape(sys.argv[1])
+          matches = re.findall(rf"^## {version} - (\d{{4}}-\d{{2}}-\d{{2}})$", pathlib.Path("CHANGELOG.md").read_text(), re.MULTILINE)
+          if len(matches) != 1:
+              raise SystemExit("changelog must contain exactly one dated heading for the release version")
+          datetime.date.fromisoformat(matches[0])
+          PY
+      - name: Verify tag commit is on main
+        run: |
+          set -euo pipefail
+          if [[ $(git rev-parse --is-shallow-repository) == true ]]; then
+            git fetch --no-tags --prune --unshallow origin '+refs/heads/main:refs/remotes/origin/main'
+          else
+            git fetch --no-tags --prune origin '+refs/heads/main:refs/remotes/origin/main'
+          fi
+          tag_commit=$(git rev-parse --verify "${GITHUB_REF}^{commit}")
+          git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+      - run: python3 scripts/validate-docs.py docs
       - run: go test -count=1 ./...
       - run: go test -count=1 -race ./...
       - run: go vet ./...
