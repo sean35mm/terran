@@ -27,13 +27,33 @@ EXPECTED_FILES = {
     Path("robots.txt"),
     Path("sitemap.xml"),
     Path("assets/site.css"),
-    Path("assets/relay-map.svg"),
     Path("assets/favicon.svg"),
 }
 EXPECTED_DIRECTORIES = {Path("assets")}
-RESOURCE_ATTRS = {"img": "src", "link": "href", "source": "src"}
+REMOTE_IMAGE_URL = "https://static.wikia.nocookie.net/starcraft/images/d/dc/CommandCenter_SCR_Game1.png/revision/latest?cb=20220108145341"
+REMOTE_IMAGE_HOST = "https://static.wikia.nocookie.net"
+REMOTE_IMAGE_ALT = "StarCraft: Remastered Terran Command Center"
+REMOTE_IMAGE_WIDTH = "511"
+REMOTE_IMAGE_HEIGHT = "402"
+REMOTE_IMAGE_CAPTION = (
+    "StarCraft: Remastered Command Center image. Image and StarCraft are © Blizzard Entertainment. "
+    "Terran is unaffiliated."
+)
+RESOURCE_ATTRS = {
+    "audio": "src",
+    "embed": "src",
+    "iframe": "src",
+    "img": "src",
+    "input": "src",
+    "link": "href",
+    "object": "data",
+    "script": "src",
+    "source": "src",
+    "track": "src",
+    "video": "src",
+}
 FORBIDDEN_TAGS = {"script", "style", "form", "iframe", "object", "embed", "base", "audio", "video"}
-CSP_REQUIRED = {
+CSP_BASE = {
     "default-src": ["'none'"],
     "style-src": ["'self'"],
     "img-src": ["'self'"],
@@ -65,7 +85,6 @@ class DocumentParser(HTMLParser):
         self.main_count = 0
         self.h1_count = 0
         self.headings: list[int] = []
-        self.overflow_regions = 0
         self.lang = ""
         self.title_depth = 0
         self.title_text = ""
@@ -80,6 +99,12 @@ class DocumentParser(HTMLParser):
         self.robots = ""
         self.robots_count = 0
         self.expected_canonical = expected_canonical
+        self.figure_depth = 0
+        self.figcaption_depth = 0
+        self.figcaption_text: list[str] = []
+        self.image_count = 0
+        self.approved_image_count = 0
+        self.source_anchor_count = 0
 
     def error(self, message: str) -> None:
         self.errors.append(f"{self.path.relative_to(ROOT)}: {message}")
@@ -95,6 +120,10 @@ class DocumentParser(HTMLParser):
             self.main_count += 1
         elif tag == "h1":
             self.h1_count += 1
+        elif tag == "figure":
+            self.figure_depth += 1
+        elif tag == "figcaption":
+            self.figcaption_depth += 1
         if re.fullmatch(r"h[1-6]", tag):
             self.headings.append(int(tag[1]))
         if tag in FORBIDDEN_TAGS:
@@ -104,16 +133,27 @@ class DocumentParser(HTMLParser):
                 self.error(f"event-handler attribute is forbidden: {attribute}")
             if attribute == "style":
                 self.error("inline style attributes are forbidden")
-        if tag == "img" and "alt" not in attrs:
-            self.error("image is missing alt text")
-        if "table-wrap" in attrs.get("class", "").split():
-            self.overflow_regions += 1
-            if attrs.get("tabindex") != "0":
-                self.error("overflow table region must have tabindex=0")
-            if not (attrs.get("aria-label", "").strip() or attrs.get("aria-labelledby", "").strip()):
-                self.error("overflow table region must have an accessible name")
-            if attrs.get("role") != "region":
-                self.error("overflow table region must use role=region")
+            if attribute in {"imagesrcset", "srcset"}:
+                self.error(f"responsive remote resource attribute is forbidden: {attribute}")
+        if tag == "img":
+            self.image_count += 1
+            if "alt" not in attrs:
+                self.error("image is missing alt text")
+            if attrs.get("src") == REMOTE_IMAGE_URL:
+                self.approved_image_count += 1
+                expected_attrs = {
+                    "alt": REMOTE_IMAGE_ALT,
+                    "width": REMOTE_IMAGE_WIDTH,
+                    "height": REMOTE_IMAGE_HEIGHT,
+                    "loading": "eager",
+                    "decoding": "async",
+                    "referrerpolicy": "no-referrer",
+                }
+                for attribute, expected in expected_attrs.items():
+                    if attrs.get(attribute) != expected:
+                        self.error(f"approved image requires {attribute}=\"{expected}\"")
+                if self.path.name != "index.html" or not self.figure_depth:
+                    self.error("approved image is allowed only in the index figure")
         if tag == "meta":
             name = attrs.get("name", "").lower()
             http_equiv = attrs.get("http-equiv", "").lower()
@@ -135,14 +175,23 @@ class DocumentParser(HTMLParser):
         if tag == "link":
             rel = {part.lower() for part in attrs.get("rel", "").split()}
             if "canonical" in rel:
+                if rel != {"canonical"}:
+                    self.error("canonical link must not declare other relationships")
                 self.canonical_count += 1
                 self.canonical = attrs.get("href", "").strip()
+        if tag == "a" and attrs.get("href") == REMOTE_IMAGE_URL:
+            if self.path.name == "index.html" and self.figcaption_depth:
+                self.source_anchor_count += 1
+                if "noreferrer" not in {part.lower() for part in attrs.get("rel", "").split()}:
+                    self.error("image source anchor requires rel=noreferrer")
+            else:
+                self.error("approved image URL is allowed as a link only in its figcaption")
         element_id = attrs.get("id")
         if element_id:
             if element_id in self.ids:
                 self.error(f"duplicate id #{element_id}")
             self.ids.add(element_id)
-        for attribute in ("href", "src"):
+        for attribute in ("data", "href", "poster", "src"):
             value = attrs.get(attribute)
             if not value:
                 continue
@@ -157,9 +206,16 @@ class DocumentParser(HTMLParser):
             if parsed.hostname and is_local_host(parsed.hostname):
                 self.error(f"local-only URL in {attribute}: {value}")
             link_rels = {part.lower() for part in attrs.get("rel", "").split()}
-            is_remote_resource = attribute == RESOURCE_ATTRS.get(tag) and not (tag == "link" and "canonical" in link_rels)
+            resource_attribute = RESOURCE_ATTRS.get(tag)
+            is_remote_resource = attribute == resource_attribute and not (tag == "link" and link_rels == {"canonical"})
             if is_remote_resource and parsed.scheme in {"http", "https", "//"}:
-                self.error(f"remote resource in <{tag}>: {value}")
+                approved_image = tag == "img" and attribute == "src" and value == REMOTE_IMAGE_URL and self.path.name == "index.html"
+                if not approved_image:
+                    self.error(f"remote resource in <{tag}>: {value}")
+            if tag == "a" and parsed.scheme in {"http", "https"} and looks_like_image_url(value):
+                approved_source = value == REMOTE_IMAGE_URL and self.path.name == "index.html" and self.figcaption_depth
+                if not approved_source:
+                    self.error(f"remote image link is forbidden: {value}")
             if parsed.scheme or parsed.netloc:
                 continue
             if parsed.path:
@@ -175,12 +231,19 @@ class DocumentParser(HTMLParser):
                 self.fragments.append(unquote(parsed.fragment))
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "title" and self.title_depth:
+        tag = tag.lower()
+        if tag == "title" and self.title_depth:
             self.title_depth -= 1
+        elif tag == "figcaption" and self.figcaption_depth:
+            self.figcaption_depth -= 1
+        elif tag == "figure" and self.figure_depth:
+            self.figure_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if self.title_depth:
             self.title_text += data
+        if self.figcaption_depth:
+            self.figcaption_text.append(data)
 
     def finish(self) -> list[str]:
         if not self.lang:
@@ -202,6 +265,16 @@ class DocumentParser(HTMLParser):
             self.error("exactly one meta Content-Security-Policy is required")
         else:
             self.validate_csp()
+        expected_images = 1 if self.path.name == "index.html" else 0
+        if self.image_count != expected_images or self.approved_image_count != expected_images:
+            self.error(f"expected {expected_images} approved remote image, found {self.approved_image_count} of {self.image_count} images")
+        expected_sources = 1 if self.path.name == "index.html" else 0
+        if self.source_anchor_count != expected_sources:
+            self.error(f"expected {expected_sources} approved image source link, found {self.source_anchor_count}")
+        caption = " ".join("".join(self.figcaption_text).split())
+        expected_caption = REMOTE_IMAGE_CAPTION if self.path.name == "index.html" else ""
+        if caption != expected_caption:
+            self.error("image caption must exactly identify the source, Blizzard copyright, and Terran non-affiliation")
         if self.main_count != 1:
             self.error(f"expected one main element, found {self.main_count}")
         if self.h1_count != 1:
@@ -211,8 +284,6 @@ class DocumentParser(HTMLParser):
         for previous, current in zip(self.headings, self.headings[1:]):
             if current > previous + 1:
                 self.error(f"heading order jumps from h{previous} to h{current}")
-        if self.path.name == "index.html" and self.overflow_regions < 1:
-            self.error("missing accessible overflow table region")
         for fragment in self.fragments:
             if fragment not in self.ids:
                 self.error(f"fragment link has no target: #{fragment}")
@@ -241,7 +312,12 @@ class DocumentParser(HTMLParser):
                 directives[name] = parts[1:]
         if "frame-ancestors" in directives:
             self.error("frame-ancestors is unsupported in a meta CSP")
-        for directive, expected in CSP_REQUIRED.items():
+        expected_directives = dict(CSP_BASE)
+        if self.path.name == "index.html":
+            expected_directives["img-src"] = ["'self'", REMOTE_IMAGE_HOST]
+        if set(directives) != set(expected_directives):
+            self.error("CSP must contain exactly the required directives")
+        for directive, expected in expected_directives.items():
             if directives.get(directive) != expected:
                 self.error(f"CSP requires {directive} {' '.join(expected)}")
 
@@ -261,14 +337,28 @@ def is_local_host(hostname: str) -> bool:
     return address.is_loopback or address.is_private or address.is_link_local or address.is_unspecified
 
 
+def looks_like_image_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    return parsed.hostname == urlsplit(REMOTE_IMAGE_URL).hostname or bool(
+        re.search(r"\.(?:avif|gif|jpe?g|png|svg|webp)$", parsed.path, re.IGNORECASE)
+    )
+
+
 def validate_html(path: Path) -> list[str]:
     parser = DocumentParser(path, expected_canonical(path))
     try:
-        parser.feed(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
+        parser.feed(source)
         parser.close()
     except (OSError, UnicodeError) as exc:
         return [f"{path.relative_to(ROOT)}: cannot read HTML: {exc}"]
-    return parser.finish()
+    errors = parser.finish()
+    expected_occurrences = 2 if path.name == "index.html" else 0
+    if source.count(REMOTE_IMAGE_URL) != expected_occurrences:
+        errors.append(
+            f"{path.relative_to(ROOT)}: approved image URL must appear exactly {expected_occurrences} times"
+        )
+    return errors
 
 
 def validate_tree() -> list[str]:
@@ -356,8 +446,6 @@ def validate_assets() -> list[str]:
             errors.append(f"{css_path.relative_to(ROOT)}: missing focus-visible treatment")
         if not re.search(r"@media\s*\(prefers-reduced-motion:\s*reduce\)", css):
             errors.append(f"{css_path.relative_to(ROOT)}: missing reduced-motion media query")
-        if not re.search(r"\.table-wrap:focus-visible\b", css):
-            errors.append(f"{css_path.relative_to(ROOT)}: missing overflow-region focus treatment")
     for svg_path in sorted((DOCS / "assets").glob("*.svg")):
         errors.extend(validate_svg(svg_path))
     return errors
@@ -390,8 +478,13 @@ def validate_svg(path: Path) -> list[str]:
     errors: list[str] = []
     try:
         source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"{path.relative_to(ROOT)}: invalid SVG: {exc}"]
+    if "<?" in source:
+        return [f"{path.relative_to(ROOT)}: SVG processing instructions are forbidden"]
+    try:
         root = ElementTree.fromstring(source)
-    except (ElementTree.ParseError, OSError, UnicodeError) as exc:
+    except ElementTree.ParseError as exc:
         return [f"{path.relative_to(ROOT)}: invalid SVG: {exc}"]
     if "<!doctype" in source.lower() or "<!entity" in source.lower():
         errors.append(f"{path.relative_to(ROOT)}: SVG declarations and entities are forbidden")

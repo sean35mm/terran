@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://static.wikia.nocookie.net/starcraft/images/d/dc/CommandCenter_SCR_Game1.png/revision/latest?cb=20220108145341" alt="StarCraft: Remastered Command Center" width="511" height="402">
+</p>
+
 # Terran
 
 Terran turns a trusted local catalog into a **Command Center** for AI coding
