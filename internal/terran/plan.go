@@ -321,7 +321,14 @@ func classifyInstruction(paths Paths, action Action, sourceHash string, prior Re
 		if err := validateUnreferencedBackup(backup); err != nil {
 			return "blocked_collision", "instruction adoption backup already exists and is unsafe: " + err.Error()
 		}
-		return "adopt", "existing exact regular file; replace unreferenced stale backup"
+		backupData, _, err := readSafeFile(backup, "unreferenced instruction backup")
+		if err != nil {
+			return "blocked_collision", "cannot validate unreferenced instruction backup: " + err.Error()
+		}
+		if hashBytes(backupData) != sourceHash {
+			return "blocked_collision", "unreferenced backup differs from the exact active file; possible interrupted replacement requires manual recovery"
+		}
+		return "adopt", "existing exact regular file; reuse exact unreferenced backup"
 	}
 	return "adopt", "existing exact regular file"
 }
@@ -456,11 +463,32 @@ var (
 	afterInstructionRename    func(string) error
 	afterInstructionHash      func(string) error
 	afterReceiptRename        func() error
+	afterReplacementBackup    func(Action) error
+	beforeReplacementInstall  func(Action) error
+	afterReplacementInstall   func(Action) error
+	beforeReplacementCleanup  func(string) error
+	beforeBackupPublish       func(string) error
+	afterBackupPublication    func(string) error
 	restoreReceiptFile        = restoreReceiptSnapshot
 	removeInstructionBackup   = safelyRemoveInstructionBackup
 )
 
+var ErrApplyAborted = errors.New("apply aborted by user")
+
+type resolvedCollision struct {
+	destinationInfo os.FileInfo
+	originalHash    string
+	originalMode    os.FileMode
+	backup          string
+	backupInfo      os.FileInfo
+	backupHash      string
+}
+
 func Apply(target, buildVersion string) (PlanResult, error) {
+	return ApplyWithOptions(target, buildVersion, ApplyOptions{})
+}
+
+func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanResult, error) {
 	if err := validateTarget(target); err != nil {
 		return PlanResult{}, err
 	}
@@ -490,8 +518,39 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 			return fmt.Errorf("receipt repository differs from enrollment")
 		}
 		result, err = makePlan(paths, loaded, receipt, target)
-		if err != nil || blocked(result) {
+		if err != nil {
 			return err
+		}
+		resolved := map[string]resolvedCollision{}
+		for i := range result.Actions {
+			action := result.Actions[i]
+			if action.Action != "blocked_collision" || options.ResolveCollision == nil {
+				continue
+			}
+			state, eligible := resolvableCollision(paths, loaded, action)
+			if !eligible {
+				continue
+			}
+			decision, err := options.ResolveCollision(action)
+			if err != nil {
+				return fmt.Errorf("resolve collision for %s: %w", action.Target, err)
+			}
+			switch decision {
+			case CollisionReplace:
+				result.Actions[i].Action = "replace"
+				result.Actions[i].Reason = "replace differing existing file; preserve original in private backup"
+			case CollisionSkip:
+				result.Actions[i].Action = "skip"
+				result.Actions[i].Reason = "keep differing existing file"
+			case CollisionAbort:
+				return ErrApplyAborted
+			default:
+				return fmt.Errorf("resolver returned invalid decision %q for %s", decision, action.Target)
+			}
+			resolved[managedActionKey(action)] = state
+		}
+		if blocked(result) {
+			return nil
 		}
 		if err := revalidateLoadedManifest(loaded); err != nil {
 			return fmt.Errorf("revalidate catalog: %w", err)
@@ -508,7 +567,7 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 			ownedInstructions[config.Target] = ReceiptInstruction(config)
 		}
 		for _, action := range result.Actions {
-			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions); err != nil {
+			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions, resolved); err != nil {
 				return err
 			}
 		}
@@ -517,7 +576,7 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 			if action.Kind != "skill" {
 				continue
 			}
-			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions); err != nil {
+			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions, resolved); err != nil {
 				return errors.Join(err, rollbackSkills(skillRollbacks))
 			}
 			rollback := prepareSkillRollback(action, ownedSkills)
@@ -529,10 +588,10 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 		var rollbacks []instructionRollback
 		verifiedInstructionHashes := map[string]string{}
 		for _, action := range result.Actions {
-			if action.Kind == "skill" || action.Action == "noop" {
+			if action.Kind == "skill" || action.Action == "noop" || action.Action == "skip" {
 				continue
 			}
-			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions); err != nil {
+			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions, resolved); err != nil {
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 			}
 			if beforeInstructionMutation != nil {
@@ -549,7 +608,8 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 				}
 				verifiedInstructionHashes[action.Target] = hashBytes(sourceBytes)
 			}
-			rollback, err := mutateInstruction(paths, loaded, action, ownedInstructions[action.Target], sourceBytes)
+			state, hasResolvedState := resolved[managedActionKey(action)]
+			rollback, err := mutateInstruction(paths, loaded, action, ownedInstructions[action.Target], sourceBytes, state, hasResolvedState)
 			rollbacks = append(rollbacks, rollback)
 			if err != nil {
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
@@ -560,6 +620,9 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 		}
 		for _, instruction := range loaded.Manifest.Instructions {
 			if !selectedInstruction(target, instruction.Target) {
+				continue
+			}
+			if actionFor(result, "instruction", instruction.Target).Action == "skip" {
 				continue
 			}
 			data, err := readVerifiedInstructionSource(loaded.Repository, loaded.InstructionSources[instruction.Target], loaded.InstructionHashes[instruction.Target])
@@ -603,19 +666,28 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 			if !selectedInstruction(target, instruction.Target) {
 				continue
 			}
+			if actionFor(result, "instruction", instruction.Target).Action == "skip" {
+				continue
+			}
 			prior, owned := ownedInstructions[instruction.Target]
 			origin := "created"
 			var originalHash, backup string
 			var originalMode uint32
 			if owned {
 				origin, originalHash, originalMode, backup = prior.Origin, prior.OriginalHash, prior.OriginalMode, prior.Backup
-			} else if actionFor(result, "instruction", instruction.Target).Action == "adopt" {
+			} else if action := actionFor(result, "instruction", instruction.Target); action.Action == "adopt" {
 				origin = "adopted"
 				destination, _ := instructionDestination(paths, instruction.Target)
 				info, _ := os.Stat(destination)
 				originalHash = loaded.InstructionHashes[instruction.Target]
 				originalMode = uint32(info.Mode().Perm())
 				backup = instructionBackup(paths, instruction.Target)
+			} else if action.Action == "replace" {
+				state := resolved[managedActionKey(action)]
+				origin = "adopted"
+				originalHash = state.originalHash
+				originalMode = uint32(state.originalMode.Perm())
+				backup = state.backup
 			}
 			destination, _ := instructionDestination(paths, instruction.Target)
 			sourceHash := verifiedInstructionHashes[instruction.Target]
@@ -633,19 +705,28 @@ func Apply(target, buildVersion string) (PlanResult, error) {
 			if !selectedConfig(target, config.Target) {
 				continue
 			}
+			if actionFor(result, "config", config.Target).Action == "skip" {
+				continue
+			}
 			prior, owned := ownedInstructions[config.Target]
 			origin := "created"
 			var originalHash, backup string
 			var originalMode uint32
 			if owned {
 				origin, originalHash, originalMode, backup = prior.Origin, prior.OriginalHash, prior.OriginalMode, prior.Backup
-			} else if actionFor(result, "config", config.Target).Action == "adopt" {
+			} else if action := actionFor(result, "config", config.Target); action.Action == "adopt" {
 				origin = "adopted"
 				destination, _ := configDestination(paths, config.Target)
 				info, _ := os.Stat(destination)
 				originalHash = loaded.ConfigHashes[config.Target]
 				originalMode = uint32(info.Mode().Perm())
 				backup = instructionBackup(paths, config.Target)
+			} else if action.Action == "replace" {
+				state := resolved[managedActionKey(action)]
+				origin = "adopted"
+				originalHash = state.originalHash
+				originalMode = uint32(state.originalMode.Perm())
+				backup = state.backup
 			}
 			destination, _ := configDestination(paths, config.Target)
 			sourceHash := verifiedInstructionHashes[config.Target]
@@ -810,7 +891,88 @@ func safelyRemoveInstructionBackup(path string) error {
 	return syncDirectory(filepath.Dir(path))
 }
 
-func preflightAction(paths Paths, loaded LoadedManifest, action Action, ownedSkills map[string]ReceiptProjection, ownedInstructions map[string]ReceiptInstruction) error {
+func managedActionKey(action Action) string { return action.Kind + "\x00" + action.Target }
+
+func resolvableCollision(paths Paths, loaded LoadedManifest, action Action) (resolvedCollision, bool) {
+	var state resolvedCollision
+	if (action.Kind != "instruction" && action.Kind != "config") || action.Action != "blocked_collision" {
+		return state, false
+	}
+	if err := validateInstructionParent(action.Destination); err != nil {
+		return state, false
+	}
+	source, desired := managedSource(loaded, action.Kind, action.Target)
+	if !desired || source != action.Source {
+		return state, false
+	}
+	sourceBytes, err := readVerifiedManagedSource(loaded.Repository, action.Kind, source, managedHash(loaded, action.Kind, action.Target))
+	if err != nil {
+		return state, false
+	}
+	original, mode, err := readSafeFile(action.Destination, "managed-file collision")
+	if err != nil || bytes.Equal(original, sourceBytes) {
+		return state, false
+	}
+	info, err := os.Lstat(action.Destination)
+	if err != nil {
+		return state, false
+	}
+	state = resolvedCollision{destinationInfo: info, originalHash: hashBytes(original), originalMode: mode, backup: instructionBackup(paths, action.Target)}
+	if !safeBackupParent(paths, filepath.Dir(state.backup)) {
+		return resolvedCollision{}, false
+	}
+	if info, err := os.Lstat(state.backup); err == nil {
+		if err := validateUnreferencedBackup(state.backup); err != nil {
+			return resolvedCollision{}, false
+		}
+		backupData, _, err := readSafeFile(state.backup, "unreferenced instruction backup")
+		if err != nil {
+			return resolvedCollision{}, false
+		}
+		hash := hashBytes(backupData)
+		if hash != state.originalHash {
+			return resolvedCollision{}, false
+		}
+		state.backupInfo, state.backupHash = info, hash
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return resolvedCollision{}, false
+	}
+	return state, true
+}
+
+func safeBackupParent(paths Paths, parent string) bool {
+	if !contained(paths.StateDir, parent) {
+		return false
+	}
+	for current := parent; ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			if err := validateTrustedDirectory(current, "backup directory"); err != nil {
+				return false
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+		if current == paths.StateDir {
+			return true
+		}
+	}
+}
+
+func preflightResolvedCollision(paths Paths, loaded LoadedManifest, action Action, expected resolvedCollision) error {
+	fresh, eligible := resolvableCollision(paths, loaded, Action{Kind: action.Kind, Action: "blocked_collision", Target: action.Target, Source: action.Source, Destination: action.Destination})
+	if !eligible || fresh.originalHash != expected.originalHash || fresh.originalMode != expected.originalMode || !os.SameFile(fresh.destinationInfo, expected.destinationInfo) {
+		return fmt.Errorf("managed-file collision changed during apply")
+	}
+	if (fresh.backupInfo == nil) != (expected.backupInfo == nil) || fresh.backupHash != expected.backupHash {
+		return fmt.Errorf("managed-file collision backup changed during apply")
+	}
+	if fresh.backupInfo != nil && !os.SameFile(fresh.backupInfo, expected.backupInfo) {
+		return fmt.Errorf("managed-file collision backup changed during apply")
+	}
+	return nil
+}
+
+func preflightAction(paths Paths, loaded LoadedManifest, action Action, ownedSkills map[string]ReceiptProjection, ownedInstructions map[string]ReceiptInstruction, resolved map[string]resolvedCollision) error {
 	if err := revalidateLoadedManifest(loaded); err != nil {
 		return fmt.Errorf("revalidate catalog before %s: %w", action.Target, err)
 	}
@@ -831,6 +993,9 @@ func preflightAction(paths Paths, loaded LoadedManifest, action Action, ownedSki
 			return fmt.Errorf("projection changed during apply")
 		}
 		return nil
+	}
+	if state, ok := resolved[managedActionKey(action)]; ok {
+		return preflightResolvedCollision(paths, loaded, action, state)
 	}
 	source, desired := managedSource(loaded, action.Kind, action.Target)
 	if desired {
@@ -950,24 +1115,32 @@ func mutateSkill(paths Paths, loaded LoadedManifest, action Action, owned map[st
 }
 
 type instructionRollback struct {
-	destination   string
-	before        []byte
-	mode          os.FileMode
-	existed       bool
-	afterHash     string
-	backup        string
-	backupMade    bool
-	backupBefore  []byte
-	backupExisted bool
-	afterInfo     os.FileInfo
+	destination     string
+	before          []byte
+	mode            os.FileMode
+	existed         bool
+	afterHash       string
+	backup          string
+	backupMade      bool
+	backupExisted   bool
+	backupAfterInfo os.FileInfo
+	backupAfterHash string
+	afterInfo       os.FileInfo
+	recovery        string
 }
 
-func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior ReceiptInstruction, verifiedSource []byte) (instructionRollback, error) {
+func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior ReceiptInstruction, verifiedSource []byte, expected resolvedCollision, hasExpected bool) (instructionRollback, error) {
 	rollback := instructionRollback{destination: action.Destination}
-	if action.Action == "adopt" {
+	if action.Action == "adopt" || action.Action == "replace" {
 		data, mode, err := readSafeFile(action.Destination, "instruction destination")
 		if err != nil {
 			return rollback, err
+		}
+		if hasExpected {
+			info, err := os.Lstat(action.Destination)
+			if err != nil || hashBytes(data) != expected.originalHash || mode != expected.originalMode || !os.SameFile(info, expected.destinationInfo) {
+				return rollback, fmt.Errorf("managed-file collision changed during apply")
+			}
 		}
 		backup := instructionBackup(paths, action.Target)
 		if _, err := os.Lstat(backup); err == nil {
@@ -975,18 +1148,54 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 			if err != nil {
 				return rollback, err
 			}
-			rollback.backupBefore, rollback.backupExisted = existing, true
+			info, err := os.Lstat(backup)
+			if hasExpected && (err != nil || expected.backupInfo == nil || hashBytes(existing) != expected.backupHash || !os.SameFile(info, expected.backupInfo)) {
+				return rollback, fmt.Errorf("managed-file collision backup changed during apply")
+			}
+			if !bytes.Equal(existing, data) {
+				return rollback, fmt.Errorf("unreferenced backup differs from active file; possible interrupted replacement requires manual recovery")
+			}
+			rollback.backupExisted = true
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return rollback, err
+		} else if hasExpected && expected.backupInfo != nil {
+			return rollback, fmt.Errorf("managed-file collision backup changed during apply")
 		}
-		rollback.backup, rollback.backupMade = backup, true
-		if err := writeBackup(backup, data, rollback.backupExisted); err != nil {
+		rollback.backup = backup
+		if !rollback.backupExisted {
+			info, created, err := publishBackup(backup, data)
+			rollback.backupMade = created
+			rollback.backupAfterInfo = info
+			rollback.backupAfterHash = hashBytes(data)
+			if err != nil {
+				return rollback, err
+			}
+		}
+		if afterBackupPublication != nil {
+			if err := afterBackupPublication(backup); err != nil {
+				return rollback, err
+			}
+		}
+		if rollback.backupMade {
+			info, err := os.Lstat(backup)
+			if err != nil || rollback.backupAfterInfo == nil || !os.SameFile(info, rollback.backupAfterInfo) {
+				return rollback, fmt.Errorf("instruction backup changed during apply")
+			}
+		}
+		if err := validatePublishedBackup(backup, data); err != nil {
 			return rollback, err
 		}
-		_ = mode
-		return rollback, nil
+		if action.Action == "adopt" {
+			return rollback, nil
+		}
+		rollback.before, rollback.mode, rollback.existed = data, mode, true
+		if afterReplacementBackup != nil {
+			if err := afterReplacementBackup(action); err != nil {
+				return rollback, err
+			}
+		}
 	}
-	if action.Action != "create" {
+	if action.Action != "create" && action.Action != "replace" {
 		data, mode, err := readSafeFile(action.Destination, "managed instruction")
 		if err != nil {
 			return rollback, err
@@ -998,8 +1207,7 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 		mode := os.FileMode(0o644)
 		if action.Kind == "config" {
 			mode = 0o600
-		}
-		if rollback.existed {
+		} else if rollback.existed {
 			mode = rollback.mode
 		}
 		mutation, err := atomicInstructionFile(action.Destination, verifiedSource, mode, action.Action == "create")
@@ -1007,6 +1215,20 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 			rollback.afterHash = managedHash(loaded, action.Kind, action.Target)
 			rollback.afterInfo = mutation.info
 		}
+		if err != nil {
+			return rollback, err
+		}
+	case "replace":
+		mode := rollback.mode
+		if action.Kind == "config" {
+			mode = 0o600
+		}
+		mutation, err := conditionalInstructionReplace(action, verifiedSource, mode, expected.destinationInfo, expected.originalHash, expected.originalMode, true)
+		if mutation.mutated {
+			rollback.afterHash = managedHash(loaded, action.Kind, action.Target)
+			rollback.afterInfo = mutation.info
+		}
+		rollback.recovery = mutation.recovery
 		if err != nil {
 			return rollback, err
 		}
@@ -1085,17 +1307,7 @@ func rollbackInstructions(rollbacks []instructionRollback) error {
 	var rollbackErrs []error
 	for i := len(rollbacks) - 1; i >= 0; i-- {
 		rollback := rollbacks[i]
-		if rollback.backupMade {
-			if rollback.backupExisted {
-				if err := atomicPrivateReplace(rollback.backup, rollback.backupBefore); err != nil {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("restore instruction backup %s: %w", rollback.backup, err))
-				}
-			} else {
-				if err := os.Remove(rollback.backup); err != nil && !errors.Is(err, os.ErrNotExist) {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("remove instruction backup %s: %w", rollback.backup, err))
-				}
-			}
-		}
+		activeRestored := true
 		if !rollback.existed {
 			if rollback.afterHash != "" {
 				if current, err := os.Stat(rollback.destination); err == nil && rollback.afterInfo != nil && os.SameFile(current, rollback.afterInfo) {
@@ -1104,20 +1316,53 @@ func rollbackInstructions(rollbacks []instructionRollback) error {
 					}
 				}
 			}
-			continue
-		}
-		if rollback.afterHash == "" {
-			if _, err := os.Lstat(rollback.destination); !errors.Is(err, os.ErrNotExist) {
-				continue
-			}
 		} else {
-			current, err := os.Stat(rollback.destination)
-			if err != nil || rollback.afterInfo == nil || !os.SameFile(current, rollback.afterInfo) {
-				continue
+			if rollback.afterHash == "" {
+				if _, err := os.Lstat(rollback.destination); !errors.Is(err, os.ErrNotExist) {
+					activeRestored = false
+				}
+			} else {
+				current, err := os.Stat(rollback.destination)
+				if err != nil || rollback.afterInfo == nil || !os.SameFile(current, rollback.afterInfo) {
+					activeRestored = false
+				}
+			}
+			if activeRestored {
+				var err error
+				if rollback.afterHash != "" {
+					_, err = conditionalInstructionReplace(Action{Destination: rollback.destination}, rollback.before, rollback.mode, rollback.afterInfo, rollback.afterHash, rollback.afterInfo.Mode().Perm(), false)
+				} else {
+					_, err = atomicInstructionFile(rollback.destination, rollback.before, rollback.mode, false)
+				}
+				if err != nil {
+					activeRestored = false
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("restore instruction %s: %w", rollback.destination, err))
+				}
 			}
 		}
-		if _, err := atomicInstructionFile(rollback.destination, rollback.before, rollback.mode, false); err != nil {
-			rollbackErrs = append(rollbackErrs, fmt.Errorf("restore instruction %s: %w", rollback.destination, err))
+		if rollback.recovery != "" {
+			recovery, mode, err := readSafeFile(rollback.recovery, "replacement recovery file")
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+			case err != nil:
+				activeRestored = false
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("inspect replacement recovery %s: %w", rollback.recovery, err))
+			case hashBytes(recovery) != hashBytes(rollback.before) || mode != rollback.mode:
+				activeRestored = false
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("newer displaced bytes preserved at %s", rollback.recovery))
+			case !activeRestored:
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("displaced original preserved at %s", rollback.recovery))
+			default:
+				if err := removeRecoveryFile(rollback.recovery); err != nil {
+					activeRestored = false
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("remove replacement recovery %s: %w", rollback.recovery, err))
+				}
+			}
+		}
+		if rollback.backupMade && activeRestored {
+			if err := removeBackupConditional(rollback.backup, rollback.backupAfterInfo, rollback.backupAfterHash); err != nil {
+				rollbackErrs = append(rollbackErrs, err)
+			}
 		}
 	}
 	return errors.Join(rollbackErrs...)
@@ -1136,8 +1381,9 @@ func ensureInstructionParent(destination string) error {
 }
 
 type instructionFileMutation struct {
-	mutated bool
-	info    os.FileInfo
+	mutated  bool
+	info     os.FileInfo
+	recovery string
 }
 
 func atomicInstructionFile(destination string, data []byte, mode os.FileMode, requireMissing bool) (instructionFileMutation, error) {
@@ -1206,113 +1452,258 @@ func atomicInstructionFile(destination string, data []byte, mode os.FileMode, re
 	return mutation, nil
 }
 
-func writeBackup(path string, data []byte, replace bool) error {
-	if !replace {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("instruction adoption backup already exists")
+func conditionalInstructionReplace(action Action, data []byte, mode os.FileMode, expectedInfo os.FileInfo, expectedHash string, expectedMode os.FileMode, runReplacementHooks bool) (instructionFileMutation, error) {
+	var mutation instructionFileMutation
+	destination := action.Destination
+	if err := ensureInstructionParent(destination); err != nil {
+		return mutation, err
+	}
+	dir := filepath.Dir(destination)
+	tmp, err := prepareInstructionTemp(dir, data, mode)
+	if err != nil {
+		return mutation, err
+	}
+	defer func() {
+		if tmp != "" {
+			_ = os.Remove(tmp)
+		}
+	}()
+	quarantineDir, err := os.MkdirTemp(dir, ".terran-quarantine-*")
+	if err != nil {
+		return mutation, err
+	}
+	quarantine := filepath.Join(quarantineDir, "displaced")
+	mutation.recovery = quarantine
+	if err := os.Rename(destination, quarantine); err != nil {
+		_ = os.Remove(quarantineDir)
+		return mutation, fmt.Errorf("quarantine expected destination: %w", err)
+	}
+	if err := syncDirectory(quarantineDir); err != nil {
+		return mutation, errors.Join(err, restoreDisplacedNoReplace(destination, quarantine))
+	}
+	if err := syncDirectory(dir); err != nil {
+		return mutation, errors.Join(err, restoreDisplacedNoReplace(destination, quarantine))
+	}
+	displaced, displacedMode, err := readSafeFile(quarantine, "quarantined managed file")
+	if err != nil {
+		return mutation, errors.Join(err, restoreDisplacedNoReplace(destination, quarantine))
+	}
+	displacedInfo, err := os.Lstat(quarantine)
+	if err != nil || !os.SameFile(displacedInfo, expectedInfo) || hashBytes(displaced) != expectedHash || displacedMode != expectedMode {
+		return mutation, errors.Join(fmt.Errorf("managed-file collision changed before replacement"), restoreDisplacedNoReplace(destination, quarantine))
+	}
+	if runReplacementHooks && beforeReplacementInstall != nil {
+		if err := beforeReplacementInstall(action); err != nil {
+			return mutation, errors.Join(err, restoreDisplacedNoReplace(destination, quarantine))
 		}
 	}
-	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+	if err := os.Link(tmp, destination); err != nil {
+		return mutation, errors.Join(fmt.Errorf("install managed file without overwrite: %w", err), restoreDisplacedNoReplace(destination, quarantine))
+	}
+	mutation.mutated = true
+	mutation.info, err = os.Lstat(destination)
+	if err != nil {
+		return mutation, err
+	}
+	if runReplacementHooks && beforeReplacementCleanup != nil {
+		if err := beforeReplacementCleanup(tmp); err != nil {
+			return mutation, err
+		}
+	}
+	if err := os.Remove(tmp); err != nil {
+		return mutation, err
+	}
+	tmp = ""
+	if runReplacementHooks && afterReplacementInstall != nil {
+		if err := afterReplacementInstall(action); err != nil {
+			return mutation, err
+		}
+	}
+	if afterInstructionRename != nil {
+		if err := afterInstructionRename(destination); err != nil {
+			return mutation, err
+		}
+	}
+	if err := syncDirectory(dir); err != nil {
+		return mutation, err
+	}
+	if err := validateTrustedFile(destination, "installed managed file"); err != nil {
+		return mutation, err
+	}
+	installedInfo, err := os.Lstat(destination)
+	if err != nil || !os.SameFile(installedInfo, mutation.info) || installedInfo.Mode().Perm() != mode.Perm() {
+		return mutation, fmt.Errorf("installed managed file changed during replacement")
+	}
+	installedHash, err := fileHash(destination)
+	if err != nil || installedHash != hashBytes(data) {
+		return mutation, fmt.Errorf("installed managed file changed during replacement")
+	}
+	if afterInstructionHash != nil {
+		if err := afterInstructionHash(destination); err != nil {
+			return mutation, err
+		}
+	}
+	displaced, displacedMode, err = readSafeFile(quarantine, "quarantined managed file")
+	if err != nil || hashBytes(displaced) != expectedHash || displacedMode != expectedMode {
+		return mutation, fmt.Errorf("quarantined original changed during replacement; recovery preserved at %s", quarantine)
+	}
+	displacedInfo, err = os.Lstat(quarantine)
+	if err != nil || !os.SameFile(displacedInfo, expectedInfo) {
+		return mutation, fmt.Errorf("quarantined original changed during replacement; recovery preserved at %s", quarantine)
+	}
+	if err := removeRecoveryFile(quarantine); err != nil {
+		return mutation, err
+	}
+	mutation.recovery = ""
+	return mutation, nil
+}
+
+func prepareInstructionTemp(dir string, data []byte, mode os.FileMode) (string, error) {
+	f, err := os.CreateTemp(dir, ".terran-instruction-*")
+	if err != nil {
+		return "", err
+	}
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := f.Chmod(mode.Perm()); err != nil {
+		return "", err
+	}
+	if _, err := f.Write(data); err != nil {
+		return "", err
+	}
+	if err := f.Sync(); err != nil {
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	ok = true
+	return tmp, nil
+}
+
+func restoreDisplacedNoReplace(destination, quarantine string) error {
+	if _, err := os.Lstat(destination); err == nil {
+		return fmt.Errorf("destination was recreated; displaced file preserved at %s", quarantine)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect destination while restoring displaced file: %w; recovery preserved at %s", err, quarantine)
+	}
+	if err := os.Link(quarantine, destination); err != nil {
+		return fmt.Errorf("restore displaced file without overwrite: %w; recovery preserved at %s", err, quarantine)
+	}
+	if err := removeRecoveryFile(quarantine); err != nil {
+		return fmt.Errorf("restored displaced file but cleanup failed: %w", err)
+	}
+	return nil
+}
+
+func removeRecoveryFile(path string) error {
+	dir := filepath.Dir(path)
+	parent := filepath.Dir(dir)
+	if err := os.Remove(path); err != nil {
 		return err
 	}
-	var err error
-	if replace {
-		err = atomicPrivateReplace(path, data)
-	} else {
-		err = atomicPrivateFile(path, data)
+	if err := os.Remove(dir); err != nil {
+		return err
 	}
+	return syncDirectory(parent)
+}
+
+func removeBackupConditional(path string, expectedInfo os.FileInfo, expectedHash string) error {
+	if expectedInfo == nil {
+		return fmt.Errorf("preserve changed instruction backup %s", path)
+	}
+	dir := filepath.Dir(path)
+	quarantineDir, err := os.MkdirTemp(dir, ".terran-backup-quarantine-*")
 	if err != nil {
 		return err
 	}
+	quarantine := filepath.Join(quarantineDir, "displaced")
+	if err := os.Rename(path, quarantine); err != nil {
+		_ = os.Remove(quarantineDir)
+		return fmt.Errorf("preserve changed instruction backup %s: %w", path, err)
+	}
+	if err := syncDirectory(quarantineDir); err != nil {
+		return errors.Join(err, restoreDisplacedNoReplace(path, quarantine))
+	}
+	if err := syncDirectory(dir); err != nil {
+		return errors.Join(err, restoreDisplacedNoReplace(path, quarantine))
+	}
+	data, mode, err := readSafeFile(quarantine, "rollback instruction backup")
+	info, statErr := os.Lstat(quarantine)
+	if err != nil || statErr != nil || !os.SameFile(info, expectedInfo) || mode != 0o600 || hashBytes(data) != expectedHash {
+		return errors.Join(fmt.Errorf("preserve changed instruction backup %s", path), restoreDisplacedNoReplace(path, quarantine))
+	}
+	if err := removeRecoveryFile(quarantine); err != nil {
+		return fmt.Errorf("remove instruction backup %s: %w", path, err)
+	}
+	return nil
+}
+
+func publishBackup(path string, data []byte) (os.FileInfo, bool, error) {
+	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+		return nil, false, err
+	}
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".terran-backup-*")
+	if err != nil {
+		return nil, false, err
+	}
+	tmp := f.Name()
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}()
+	if err := f.Chmod(0o600); err != nil {
+		return nil, false, err
+	}
+	if _, err := f.Write(data); err != nil {
+		return nil, false, err
+	}
+	if err := f.Sync(); err != nil {
+		return nil, false, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, false, err
+	}
+	if beforeBackupPublish != nil {
+		if err := beforeBackupPublish(path); err != nil {
+			return nil, false, err
+		}
+	}
+	if err := os.Link(tmp, path); err != nil {
+		return nil, false, fmt.Errorf("publish instruction backup without overwrite: %w", err)
+	}
+	info, statErr := os.Lstat(path)
+	if statErr != nil {
+		return nil, true, statErr
+	}
+	if err := os.Remove(tmp); err != nil {
+		return info, true, err
+	}
+	if err := syncDirectory(dir); err != nil {
+		return info, true, err
+	}
+	return info, true, nil
+}
+
+func validatePublishedBackup(path string, data []byte) error {
 	if err := validateTrustedFile(path, "instruction backup"); err != nil {
 		return err
 	}
-	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0o600 {
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
 		return fmt.Errorf("instruction backup must be mode 0600")
 	}
 	hash, err := fileHash(path)
 	if err != nil || hash != hashBytes(data) {
 		return fmt.Errorf("instruction backup hash verification failed")
 	}
-	return nil
-}
-
-func atomicPrivateFile(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".terran-backup-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	ok := false
-	defer func() {
-		_ = f.Close()
-		if !ok {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("instruction backup changed during apply")
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	if err := syncDirectory(dir); err != nil {
-		return err
-	}
-	ok = true
-	return nil
-}
-
-func atomicPrivateReplace(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	if err := ensurePrivateDir(dir); err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(dir, ".terran-backup-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	ok := false
-	defer func() {
-		_ = f.Close()
-		if !ok {
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	if err := syncDirectory(dir); err != nil {
-		return err
-	}
-	ok = true
 	return nil
 }
 

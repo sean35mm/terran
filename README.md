@@ -199,6 +199,10 @@ Inspect every source, destination, action, and reason before apply.
 something different or unsafe. `blocked_drift` means receipt-owned content,
 metadata, or an adoption backup no longer matches.
 
+On an actual human terminal, `terran apply` may also report `skip` for a safe
+differing unowned instruction or config file the user chose to keep. That item
+remains an unowned collision in later plan and status output.
+
 Use target filters when needed:
 
 ```sh
@@ -255,10 +259,50 @@ inspect every action, then `terran apply`, `terran status`, and `terran doctor`.
 ## Collisions and drift
 
 Without a receipt, a missing managed file is created. An existing safe regular
-file is adopted only when its bytes exactly match the source; any differing file,
-symlink, hard link, directory, device, unsafe owner, or unsafe mode blocks all
-selected mutations. Adoption leaves the active inode, bytes, mode, and mtime
-untouched and stores a validated mode-0600 original backup in private Terran state.
+file is adopted when its bytes exactly match the source. During human `terran
+apply` only, when both input and diagnostics are attached to a terminal, Terran
+may prompt for a differing unowned instruction or config file whose parent,
+ownership, mode, link count, type, and backup destination are all safe. The user
+can replace it with Terran's complete file while preserving the original in a
+private mode-0600 backup, keep it unowned and continue other safe actions, or
+abort before any mutation. All answers and state are revalidated before the first
+change. Empty input or EOF aborts. `plan`, `status`, `--json`, non-TTY automation,
+receipt-owned drift, skills, symlinks, hard links, directories, devices, and
+unsafe files or parents never prompt and remain blocked. Adoption of an exact
+file leaves the active inode, bytes, mode, and mtime untouched and stores the
+same validated private backup.
+
+Replacement first writes and verifies the private backup and a same-directory
+temporary managed file. It then atomically moves the expected destination into a
+private-name quarantine, verifies that the moved inode, bytes, and mode are the
+exact approved snapshot, and installs the prepared file with a hard-link
+no-overwrite operation only while the destination remains absent. A process that
+replaces, recreates, or modifies the path during this protocol causes apply to
+fail without a receipt; newer destination bytes are left in place or retained in
+the reported quarantine recovery file. Rollback uses the same conditional
+protocol and will not overwrite a changed managed destination.
+
+A reported quarantine recovery file is not receipt-owned, automatically
+rediscovered, or automatically cleaned on a later run. Preserve and inspect it,
+reconcile it with the active file and private backup, and remove it only after an
+explicit user decision confirms that no needed bytes remain.
+
+If replacement is interrupted after the fixed private backup is published but
+before its receipt is committed, a later exact managed destination is not adopted
+when that unreferenced backup differs from it. Terran reports a possible
+interrupted replacement and preserves the backup for manual recovery instead of
+overwriting it as stale state.
+
+A same-user process that already has the displaced inode open can still write
+through that descriptor after the path is quarantined. Terran rechecks the
+quarantine before cleanup and preserves it when such a write is observed. There
+is no portable Darwin/Linux primitive that revokes an existing descriptor, so a
+write in the final interval between that check and unlink cannot be detected;
+the exact pre-replacement bytes remain recoverable in the private mode-0600
+backup, but bytes written only through that descriptor in that final interval
+may not be captured. A same-user process retaining an open descriptor and writing
+after the approved snapshot is outside Terran's portable protection boundary;
+Terran does not claim no-loss behavior against that process.
 
 With a receipt, Terran updates an instruction or config only when the active target
 matches the previously applied hash. External edits, missing targets, or tampered
@@ -325,11 +369,12 @@ terran status [--target all|claude|agents|opencode] [--json]
 terran doctor [--json]
 ```
 
-Human output goes to stdout and diagnostics to stderr. JSON mode emits one object
+Human output goes to stdout and diagnostics and interactive prompts to stderr.
+JSON mode emits one object
 with `schema_version: 1`. Plan and status items include `kind`, stable `target`,
 source, destination, action/status, and reason/detail. Exit codes are 0 for
-success, 1 for operational failure or non-clean health/status, 2 for usage, and 3
-for blocked collision or drift in plan/apply.
+success, 1 for user-aborted apply, operational failure, or non-clean
+health/status, 2 for usage, and 3 for blocked collision or drift in plan/apply.
 
 ## For AI agents
 
@@ -356,8 +401,10 @@ enroll, update, customize, diagnose, or remove Terran:
 6. Run `terran plan` before every apply. Inspect every item—not just blocks—for
    kind, source, destination, action, and reason. Remember a normal full enrollment
    of this catalog has 15 items.
-7. Stop on collision or drift. Never delete, move, rename, overwrite, or “back up”
-   unrelated content yourself to clear a destination without explicit user intent.
+7. Stop on drift and ineligible collisions. A human terminal apply may offer its
+   bounded replace/keep/abort prompt for a safe unowned instruction or config
+   file; otherwise never delete, move, rename, overwrite, or “back up” unrelated
+   content yourself to clear a destination.
 8. After apply, run `terran status` and `terran doctor`. Redact private absolute
    paths; never publish raw JSON output from a user's machine.
 9. Explain that skills are live symlinks into the enrolled checkout, while global

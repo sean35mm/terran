@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -25,9 +26,16 @@ type versionInfo struct {
 	Date          string `json:"date"`
 }
 
-func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+func main() {
+	interactive := terminalFile(os.Stdin) && terminalFile(os.Stderr)
+	os.Exit(runWithIO(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, interactive))
+}
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithIO(args, strings.NewReader(""), stdout, stderr, false)
+}
+
+func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer, interactive bool) int {
 	if len(args) == 0 {
 		printHelp(stdout)
 		return 0
@@ -102,7 +110,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case "plan", "apply", "status":
-		return runProjectionCommand(args[0], args[1:], stdout, stderr)
+		return runProjectionCommand(args[0], args[1:], stdin, stdout, stderr, interactive)
 	case "doctor":
 		if commandHelpRequested(args[1:]) {
 			printCommandHelp(stdout, "doctor")
@@ -131,7 +139,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-func runProjectionCommand(command string, args []string, stdout, stderr io.Writer) int {
+func runProjectionCommand(command string, args []string, stdin io.Reader, stdout, stderr io.Writer, interactive bool) int {
 	if commandHelpRequested(args) {
 		printCommandHelp(stdout, command)
 		return 0
@@ -172,7 +180,11 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 	var result terran.PlanResult
 	var err error
 	if command == "apply" {
-		result, err = terran.Apply(options.target, version)
+		if interactive && !options.json {
+			result, err = terran.ApplyWithOptions(options.target, version, terran.ApplyOptions{ResolveCollision: promptCollisionResolver(stdin, stderr)})
+		} else {
+			result, err = terran.Apply(options.target, version)
+		}
 	} else {
 		result, err = terran.Plan(options.target)
 	}
@@ -205,6 +217,36 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 		}
 	}
 	return 0
+}
+
+func promptCollisionResolver(stdin io.Reader, stderr io.Writer) func(terran.Action) (terran.CollisionDecision, error) {
+	scanner := bufio.NewScanner(stdin)
+	scanner.Buffer(make([]byte, 128), 128)
+	return func(action terran.Action) (terran.CollisionDecision, error) {
+		for {
+			if _, err := fmt.Fprintf(stderr, "Existing %s target %s differs from Terran's version. Replace it with Terran's complete version after saving a private restoration backup? [r]eplace (recommended), [k]eep, [a]bort: ", action.Kind, action.Target); err != nil {
+				return "", fmt.Errorf("write collision prompt: %w", err)
+			}
+			if !scanner.Scan() {
+				if err := scanner.Err(); err != nil {
+					return "", fmt.Errorf("read collision choice: %w", err)
+				}
+				return terran.CollisionAbort, nil
+			}
+			switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
+			case "r", "replace":
+				return terran.CollisionReplace, nil
+			case "k", "keep":
+				return terran.CollisionSkip, nil
+			case "", "a", "abort":
+				return terran.CollisionAbort, nil
+			default:
+				if _, err := fmt.Fprintln(stderr, "Please enter replace/r, keep/k, or abort/a."); err != nil {
+					return "", fmt.Errorf("write invalid collision choice: %w", err)
+				}
+			}
+		}
+	}
 }
 
 type commandOptions struct {
@@ -302,7 +344,7 @@ func printCommandIntro(w io.Writer, command string) {
 		"version": "Usage: terran version [--json]\nRead-only. Prints build metadata. Exit: 0 success, 1 output failure, 2 usage.\n\nFlags:",
 		"enroll":  "Usage: terran enroll --repo PATH [--name NAME] [--replace] [--json]\nMutates private enrollment state; it never creates skill links, instruction files, or config files. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
 		"plan":    "Usage: terran plan [--target all|claude|agents|opencode] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
-		"apply":   "Usage: terran apply [--target all|claude|agents|opencode] [--json]\nMutates only validated skill leaves, fixed instruction/config files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
+		"apply":   "Usage: terran apply [--target all|claude|agents|opencode] [--json]\nMutates only validated skill leaves, fixed instruction/config files, and the receipt after an all-actions preflight. On a human terminal only, safe differing unowned instruction/config files may be replaced with a private backup, kept, or aborted before mutation. Exit: 0 applied, 1 abort or operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"status":  "Usage: terran status [--target all|claude|agents|opencode] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
 		"doctor":  "Usage: terran doctor [--json]\nRead-only diagnostics. Exit: 0 healthy, 1 unhealthy or output failure, 2 usage.\n\nFlags:",
 	}

@@ -6,6 +6,7 @@ All notable changes are documented here. Terran follows semantic versioning.
 
 - Add strict, fixed-target whole-file management for a sanitized global OpenCode `opencode.json`, with distinct config receipts and the same collision, drift, adoption, backup, restoration, status, doctor, and rollback guarantees as global instructions.
 - Preserve Naru agent selection without treating Naru as an npm plugin or coupling its separately managed version to Terran's catalog version.
+- Add terminal-only replace/keep/abort resolution for safely backable unowned instruction and config collisions, with adopted restoration metadata, all-decisions preflight, and fail-closed noninteractive behavior.
 
 ## 0.1.0 - Initial release
 

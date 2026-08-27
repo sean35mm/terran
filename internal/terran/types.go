@@ -91,6 +91,21 @@ type PlanResult struct {
 	Actions       []Action `json:"actions"`
 }
 
+type CollisionDecision string
+
+const (
+	CollisionReplace CollisionDecision = "replace"
+	CollisionSkip    CollisionDecision = "skip"
+	CollisionAbort   CollisionDecision = "abort"
+)
+
+// ApplyOptions enables explicit resolution of only the safe unowned managed-file
+// collisions selected by ApplyWithOptions. The resolver receives paths and
+// metadata, never either file's contents.
+type ApplyOptions struct {
+	ResolveCollision func(Action) (CollisionDecision, error)
+}
+
 type StatusItem struct {
 	Kind        string `json:"kind"`
 	Skill       string `json:"skill,omitempty"`
