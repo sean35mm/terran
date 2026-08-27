@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://sean35mm.github.io/terran/sitemap.xml

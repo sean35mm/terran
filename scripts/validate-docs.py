@@ -18,10 +18,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 ORIGIN = "https://sean35mm.github.io/terran/"
 ORIGIN_PARTS = urlsplit(ORIGIN)
+SITEMAP_URL = f"{ORIGIN}sitemap.xml"
+ROBOTS_CONTENT = f"User-agent: *\nAllow: /\nSitemap: {SITEMAP_URL}\n"
 EXPECTED_FILES = {
     Path(".nojekyll"),
     Path("index.html"),
     Path("404.html"),
+    Path("robots.txt"),
     Path("sitemap.xml"),
     Path("assets/site.css"),
     Path("assets/relay-map.svg"),
@@ -327,6 +330,16 @@ def validate_sitemap(path: Path) -> list[str]:
     return errors
 
 
+def validate_robots(path: Path) -> list[str]:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"{path.relative_to(ROOT)}: cannot read robots policy: {exc}"]
+    if content != ROBOTS_CONTENT:
+        return [f"{path.relative_to(ROOT)}: content must exactly allow public crawling and reference {SITEMAP_URL}"]
+    return []
+
+
 def validate_assets() -> list[str]:
     errors: list[str] = []
     css_path = DOCS / "assets" / "site.css"
@@ -421,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         for html_path in sorted(DOCS.glob("*.html")):
             errors.extend(validate_html(html_path))
         errors.extend(validate_sitemap(DOCS / "sitemap.xml"))
+        errors.extend(validate_robots(DOCS / "robots.txt"))
         errors.extend(validate_assets())
         errors.extend(validate_public_urls())
     if errors:
