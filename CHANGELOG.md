@@ -2,7 +2,7 @@
 
 All notable changes are documented here. Terran follows semantic versioning.
 
-## Unreleased
+## 0.3.0 - 2026-09-22
 
 - Remove the `plainspoken-writing` skill from the default catalog.
 - Sync curated OpenCode and global instruction defaults; manage the Naru runtime configuration as a fixed OpenCode target.

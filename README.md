@@ -92,9 +92,8 @@ The canonical OpenCode config selects `default_agent: naru` without pinning its
 model. The Naru runtime config defines the per-dispatch model classes. Install
 Naru separately from <https://github.com/sean35mm/naru-opencode> on each machine
 before selecting the agent; Terran does not install or upgrade its agents, tools,
-or plugin. Build Terran from this revision before applying this catalog; the
-published 0.2.0 binary predates the `naru-runtime` target. The curated OpenCode
-config omits machine-local MCP URLs and paths.
+or plugin. Use Terran 0.3.0 or newer for the `naru-runtime` target. The curated
+OpenCode config omits machine-local MCP URLs and paths.
 
 Terran does not manage secrets, packages, shell profiles, MCP server processes,
 remote clone/fetch, services, a daemon, or Windows.
@@ -132,7 +131,7 @@ instruction IDs, and the fixed `opencode-config` and `naru-runtime` config IDs:
 {
   "schema_version": 1,
   "id": "terran-default",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "configs": [
     {"target": "opencode-config", "source": "config/opencode/opencode.json"},
     {"target": "naru-runtime", "source": "config/opencode/naru-runtime.json"}
@@ -165,13 +164,13 @@ From a trusted checkout:
 cd /absolute/path/to/terran
 mkdir -p .local "$HOME/.local/bin"
 go test -count=1 ./...
-go build -trimpath -ldflags '-X main.version=0.2.0-dev' -o .local/terran ./cmd/terran
+go build -trimpath -ldflags '-X main.version=0.3.0-dev' -o .local/terran ./cmd/terran
 install -m 0755 .local/terran "$HOME/.local/bin/terran"
 ```
 
 Source builds report a development version. `terran doctor` may warn when the
-binary version does not exactly match the catalog release; a `0.2.0-dev` build is
-recognized as compatible with catalog `0.2.0`.
+binary version does not exactly match the catalog release; a `0.3.0-dev` build is
+recognized as compatible with catalog `0.3.0`.
 
 ### Clone and build
 
@@ -182,7 +181,7 @@ git clone https://github.com/sean35mm/terran "$HOME/src/terran"
 cd "$HOME/src/terran"
 mkdir -p .local "$HOME/.local/bin"
 go test -count=1 ./...
-go build -trimpath -ldflags '-X main.version=0.2.0-dev' -o .local/terran ./cmd/terran
+go build -trimpath -ldflags '-X main.version=0.3.0-dev' -o .local/terran ./cmd/terran
 install -m 0755 .local/terran "$HOME/.local/bin/terran"
 ```
 
@@ -196,10 +195,10 @@ file—do not use a curl-pipe-only install:
 
 ```sh
 less install.sh
-sh install.sh v0.2.0
+sh install.sh v0.3.0
 ```
 
-Use `sh install.sh v0.2.0 "$HOME/bin"` for another absolute destination. The
+Use `sh install.sh v0.3.0 "$HOME/bin"` for another absolute destination. The
 installer downloads the pinned archive and `SHA256SUMS` over HTTPS, requires one
 exact checksum entry, verifies it, and atomically installs without `sudo`.
 Release checksums detect corruption or mismatch; they do not protect against a
@@ -229,9 +228,9 @@ terran doctor
 ```
 
 `claude` includes Claude skill links and `claude-global`; `agents` includes only
-shared skill projections; `opencode` includes both `opencode-global` and
-`opencode-config`; `all`
-includes everything. Filters preserve unselected receipt entries.
+shared skill projections; `opencode` includes `opencode-global`,
+`opencode-config`, and `naru-runtime`; `all` includes everything. Filters
+preserve unselected receipt entries.
 
 `status` distinguishes pending safe work from collision and drift. `doctor`
 validates platform, binary discovery/version, enrollment, state permissions,
