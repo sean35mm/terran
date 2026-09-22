@@ -363,6 +363,8 @@ func friendlyActionName(action terran.Action) string {
 		return "OpenCode instructions"
 	case "opencode-config":
 		return "OpenCode configuration"
+	case "naru-runtime":
+		return "Naru runtime configuration"
 	default:
 		return action.Target
 	}

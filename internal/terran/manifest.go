@@ -159,7 +159,7 @@ func LoadManifest(repo string) (LoadedManifest, error) {
 	sort.Slice(manifest.Instructions, func(i, j int) bool { return manifest.Instructions[i].Target < manifest.Instructions[j].Target })
 	for i := range manifest.Configs {
 		config := &manifest.Configs[i]
-		if config.Target != "opencode-config" {
+		if config.Target != "opencode-config" && config.Target != "naru-runtime" {
 			return LoadedManifest{}, fmt.Errorf("unsupported config target %q", config.Target)
 		}
 		if _, exists := configSources[config.Target]; exists {

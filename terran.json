@@ -6,6 +6,10 @@
     {
       "target": "opencode-config",
       "source": "config/opencode/opencode.json"
+    },
+    {
+      "target": "naru-runtime",
+      "source": "config/opencode/naru-runtime.json"
     }
   ],
   "instructions": [
@@ -22,11 +26,6 @@
     {
       "skill": "herdr",
       "source": "skills/herdr",
-      "targets": ["agents", "claude"]
-    },
-    {
-      "skill": "plainspoken-writing",
-      "source": "skills/plainspoken-writing",
       "targets": ["agents", "claude"]
     },
     {

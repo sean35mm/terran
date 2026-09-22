@@ -30,7 +30,7 @@ func selectedInstruction(filter, target string) bool {
 }
 
 func selectedConfig(filter, target string) bool {
-	return filter == "all" || (filter == "opencode" && target == "opencode-config")
+	return filter == "all" || (filter == "opencode" && (target == "opencode-config" || target == "naru-runtime"))
 }
 
 func LoadReceipt(paths Paths) (Receipt, error) {

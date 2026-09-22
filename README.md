@@ -38,9 +38,9 @@ blank, EOF, or `q` quits. A second default-No confirmation approves the exact pl
 while Terran holds its apply lock. A clean returning run reports that everything
 is up to date without rewriting the receipt.
 
-On this catalog, a fresh fully selected plan contains 15 items: 12 skill
-projections (six skills across two roots), two global instruction copies, and one
-global config copy. Inspect every source, destination, action, and reason before
+On this catalog, a fresh fully selected plan contains 14 items: 10 skill
+projections (five skills across two roots), two global instruction copies, and two
+global config copies. Inspect every source, destination, action, and reason before
 apply. Bare `terran` is for humans in a real terminal. Bare non-TTY use prints
 help and never mutates.
 
@@ -77,19 +77,24 @@ Terran manages three kinds of content:
    `opencode-global` goes to
    `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/AGENTS.md`. Copies change only
    through `terran apply`.
-3. **Global configs** under `config/`. The `opencode-config` source is strict,
-   sanitized JSON copied as a whole file to
-   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json`. It is a distinct
-   config projection, not instruction prose. New config files are mode 0600.
+3. **Global configs** under `config/`. The strict, sanitized JSON sources
+   `opencode-config` and `naru-runtime` are copied as whole files to
+   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json` and
+   `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/naru-runtime.json`, respectively.
+   New config files are mode 0600.
 
 The instruction sources are complete, harness-specific policy files. They are
 deliberately different from each other and from the repository-local
 [`AGENTS.md`](AGENTS.md). Terran does not merge Markdown or accept catalog-defined
 destinations, strategies, modes, commands, or hooks.
 
-The canonical OpenCode config preserves `default_agent: naru-orchestrator`, but
-Naru installation and upgrades remain separate from Terran and from OpenCode's
-npm plugin list. Terran does not invent or enforce a Naru package version.
+The canonical OpenCode config selects `default_agent: naru` without pinning its
+model. The Naru runtime config defines the per-dispatch model classes. Install
+Naru separately from <https://github.com/sean35mm/naru-opencode> on each machine
+before selecting the agent; Terran does not install or upgrade its agents, tools,
+or plugin. Build Terran from this revision before applying this catalog; the
+published 0.2.0 binary predates the `naru-runtime` target. The curated OpenCode
+config omits machine-local MCP URLs and paths.
 
 Terran does not manage secrets, packages, shell profiles, MCP server processes,
 remote clone/fetch, services, a daemon, or Windows.
@@ -121,7 +126,7 @@ atomically writes the receipt. `status` expresses the same model as health state
 `doctor` checks the wider installation and receipt invariants.
 
 Manifest schema version 1 supports named skill projections, only these two
-instruction IDs, and the fixed `opencode-config` config ID:
+instruction IDs, and the fixed `opencode-config` and `naru-runtime` config IDs:
 
 ```json
 {
@@ -129,7 +134,8 @@ instruction IDs, and the fixed `opencode-config` config ID:
   "id": "terran-default",
   "version": "0.2.0",
   "configs": [
-    {"target": "opencode-config", "source": "config/opencode/opencode.json"}
+    {"target": "opencode-config", "source": "config/opencode/opencode.json"},
+    {"target": "naru-runtime", "source": "config/opencode/naru-runtime.json"}
   ],
   "instructions": [
     {"target": "claude-global", "source": "instructions/claude/CLAUDE.md"},
@@ -413,7 +419,7 @@ enroll, update, customize, diagnose, or remove Terran:
    explicitly intends to replace a different enrolled repository.
 6. Run `terran plan` before every apply. Inspect every item—not just blocks—for
    kind, source, destination, action, and reason. Remember a normal full enrollment
-   of this catalog has 15 items.
+   of this catalog has 14 items.
 7. Stop on drift and ineligible collisions. A human terminal apply may offer its
    bounded replace/keep/quit prompt for a safe unowned instruction or config
    file; otherwise never delete, move, rename, overwrite, or “back up” unrelated

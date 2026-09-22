@@ -318,7 +318,7 @@ func TestWizardCollisionChoicesShareReaderAndKeepIsPartialSuccess(t *testing.T) 
 	if err := os.MkdirAll(filepath.Dir(configSource), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configSource, []byte(`{"default_agent":"naru-orchestrator"}`), 0o644); err != nil {
+	if err := os.WriteFile(configSource, []byte(`{"default_agent":"naru"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	manifest := terran.Manifest{SchemaVersion: 1, ID: "test-catalog", Version: "0.2.0", Projections: []terran.Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents"}}}, Configs: []terran.Config{{Target: "opencode-config", Source: "config/opencode.json"}}}

@@ -55,6 +55,8 @@ func configDestination(paths Paths, target string) (string, error) {
 	switch target {
 	case "opencode-config":
 		return filepath.Join(paths.ConfigBase, "opencode", "opencode.json"), nil
+	case "naru-runtime":
+		return filepath.Join(paths.ConfigBase, "opencode", "naru-runtime.json"), nil
 	default:
 		return "", fmt.Errorf("unsupported config target %q", target)
 	}

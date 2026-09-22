@@ -1,9 +1,21 @@
 {
   "subagent_depth": 2,
   "$schema": "https://opencode.ai/config.json",
-  "default_agent": "naru-orchestrator",
-  "plugin": [],
+  "default_agent": "naru",
+  "plugin": ["@dietrichgebert/ponytail@4.10.0"],
   "agent": {
+    "naru-reader": {
+      "model": "openai/gpt-6-luna-fast",
+      "variant": "high"
+    },
+    "naru-runner": {
+      "model": "openai/gpt-6-sol-fast",
+      "variant": "medium"
+    },
+    "naru-writer": {
+      "model": "openai/gpt-6-sol-fast",
+      "variant": "medium"
+    },
     "code-review": {
       "description": "Read-only review for concrete, evidence-backed bugs, security or privacy issues, regressions, material performance defects, and meaningful coverage gaps.",
       "mode": "subagent",

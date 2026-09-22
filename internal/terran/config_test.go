@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-const testOpenCodeConfig = `{"$schema":"https://opencode.ai/config.json","default_agent":"naru-orchestrator","mcp":{"service":{"headers":{"Authorization":"{env:SERVICE_AUTHORIZATION_HEADER}"}}}}`
+const testOpenCodeConfig = `{"$schema":"https://opencode.ai/config.json","default_agent":"naru","mcp":{"service":{"headers":{"Authorization":"{env:SERVICE_AUTHORIZATION_HEADER}"}}}}`
 
 func configEnvironment(t *testing.T, withInstruction bool) (string, string) {
 	t.Helper()
@@ -182,12 +182,27 @@ func TestConfigManifestFingerprintValidationAndDestinations(t *testing.T) {
 
 func TestConfigManifestRejectsInvalidEntriesAndCanonicalSourceIsSafe(t *testing.T) {
 	t.Run("canonical source", func(t *testing.T) {
+		root, err := filepath.Abs(filepath.Join("..", ".."))
+		if err != nil {
+			t.Fatal(err)
+		}
+		catalog, err := LoadManifest(root)
+		if err != nil || len(catalog.Manifest.Configs) != 2 {
+			t.Fatalf("default catalog config targets: %#v %v", catalog.Manifest.Configs, err)
+		}
 		data, err := os.ReadFile(filepath.Join("..", "..", "config", "opencode", "opencode.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := validateOpenCodeConfig(data); err != nil {
 			t.Fatalf("canonical config is unsafe: %v", err)
+		}
+		runtime, err := os.ReadFile(filepath.Join("..", "..", "config", "opencode", "naru-runtime.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateOpenCodeConfig(runtime); err != nil {
+			t.Fatalf("canonical Naru runtime config is unsafe: %v", err)
 		}
 	})
 
@@ -241,6 +256,45 @@ func TestOpenCodeFilterSelectsInstructionAndConfig(t *testing.T) {
 	plan, err := Plan("opencode")
 	if err != nil || len(plan.Actions) != 2 || actionFor(plan, "config", "opencode-config").Target == "" || actionFor(plan, "instruction", "opencode-global").Target == "" {
 		t.Fatalf("opencode filter did not select both files: %#v %v", plan, err)
+	}
+}
+
+func TestNaruRuntimeConfigProjectsWithOpenCode(t *testing.T) {
+	home, repo := configEnvironment(t, false)
+	configs := []Config{
+		{Target: "opencode-config", Source: "config/opencode.json"},
+		{Target: "naru-runtime", Source: "config/naru-runtime.json"},
+	}
+	writeCatalogWithConfigs(t, repo, nil, configs)
+	runtime := `{"schemaVersion":1,"models":{}}`
+	if err := os.WriteFile(filepath.Join(repo, "config", "naru-runtime.json"), []byte(runtime), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prepareInstructionParents(t)
+	if _, _, err := Enroll(repo, "test", false); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Plan("opencode")
+	want := filepath.Join(home, "config", "opencode", "naru-runtime.json")
+	if err != nil || len(plan.Actions) != 2 || actionFor(plan, "config", "naru-runtime").Destination != want {
+		t.Fatalf("Naru runtime not selected at fixed destination: %#v %v", plan, err)
+	}
+	if _, err := Apply("opencode", "test-build"); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := ResolvePaths()
+	receipt, err := LoadReceipt(paths)
+	if err != nil || len(receipt.Configs) != 2 {
+		t.Fatalf("both configs should be owned: %#v %v", receipt, err)
+	}
+	if data, err := os.ReadFile(want); err != nil || string(data) != runtime {
+		t.Fatalf("runtime config not copied: %s %v", data, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "config", "naru-runtime.json"), configJSON(t, "token", "not-an-env-ref"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadManifest(repo); err == nil {
+		t.Fatal("unsafe Naru runtime source accepted")
 	}
 }
 
@@ -324,7 +378,7 @@ func TestConfigCreateUpdateNoopDriftRemoveStatusDoctorAndReceipt(t *testing.T) {
 		t.Fatalf("doctor config check missing: %#v", doctor)
 	}
 	source := filepath.Join(repo, "config", "opencode.json")
-	updated := `{"default_agent":"naru-orchestrator","shell":"zsh"}`
+	updated := `{"default_agent":"naru","shell":"zsh"}`
 	if err := os.WriteFile(source, []byte(updated), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +435,7 @@ func TestConfigAdoptRestoreCollisionAndReceiptValidation(t *testing.T) {
 		if len(receipt.Configs) != 1 || receipt.Configs[0].Origin != "adopted" || receipt.Configs[0].OriginalMode != 0o640 || fileMode(t, receipt.Configs[0].Backup) != 0o600 {
 			t.Fatalf("adopted config receipt/backup invalid: %#v", receipt)
 		}
-		if err := os.WriteFile(filepath.Join(repo, "config", "opencode.json"), []byte(`{"default_agent":"naru-orchestrator"}`), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(repo, "config", "opencode.json"), []byte(`{"default_agent":"naru"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		_, _ = Apply("opencode", "test")

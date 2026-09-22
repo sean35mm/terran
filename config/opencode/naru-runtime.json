@@ -1,0 +1,33 @@
+{
+  "implementation": {
+    "cleanWorkspaceRequired": true,
+    "maxConcurrentWriters": 50,
+    "workspaceMode": "auto"
+  },
+  "models": {
+    "deep": {
+      "chain": ["openai/gpt-6-sol-fast@high"],
+      "use": "architecture, security, data models, final review, tricky edits"
+    },
+    "light": {
+      "chain": ["openai/gpt-6-luna-fast@high"],
+      "use": "wide fan-out, mechanical lookups, simple reads"
+    },
+    "reasoning": {
+      "chain": ["openai/gpt-6-sol-fast@xhigh"],
+      "use": "hardest multi-step problems where latency doesn't matter"
+    },
+    "standard": {
+      "chain": ["openai/gpt-6-sol-fast@medium"],
+      "use": "ordinary investigation, edits, checks"
+    },
+    "crosscheck": {
+      "chain": ["openai/gpt-6-astra@medium"],
+      "use": "high-confidence second opinion on finished work or a contested finding; terse and decisive"
+    }
+  },
+  "schemaVersion": 1,
+  "mcp": {
+    "configuredTools": "allow"
+  }
+}

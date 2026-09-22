@@ -152,10 +152,28 @@ faster and clearer to do directly.
 
 ## Final response
 
+- Before sending any user-facing response you expect the user to read, invoke the
+  `unslop` skill and apply it so the prose is clean and readable. This includes
+  final answers and substantive progress updates. Skip it only for tool-only
+  messages or machine-readable output where rewriting would break the format.
 - Lead with the outcome. Summarize what changed and why.
 - List every modified file and the change made in each.
 - Report checks actually run, not checks merely recommended.
 - State material assumptions, residual risks, blockers, and unverified areas.
+
+## Codebase-memory indexing authorization
+
+- For authorized tasks, read-only queries against existing indexes are allowed only
+  after checking index freshness and comparing it with the current repository state.
+- Indexing, reindexing, or refreshing through MCP, CLI, or automation requires an
+  explicit request from the current user. A missing or stale index is not permission
+  to refresh it; fall back to literal source search instead.
+- Limit any explicitly requested indexing to the exact requested repository or
+  worktree root. Never index a home directory, Desktop, or another broad parent that
+  contains multiple projects. "This repo" means the current repository root; ask if
+  that root is ambiguous.
+- Never autonomously enable or change `auto_index`, `auto_watch`, or other watcher
+  settings.
 
 <!-- weaver:start — managed by Weaver; re-run `weaver init` to update; use `weaver deinit` for project files or `weaver deinit --global` for global files -->
 ## Weaver — shared agent context

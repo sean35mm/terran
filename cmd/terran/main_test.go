@@ -240,7 +240,7 @@ func TestCLIInstructionJSONHumanAndOpenCodeTarget(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, "config"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, "config", "opencode.json"), []byte(`{"default_agent":"naru-orchestrator"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "config", "opencode.json"), []byte(`{"default_agent":"naru"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	manifest := `{"schema_version":1,"id":"test-catalog","version":"0.1.0","projections":[],"instructions":[{"target":"opencode-global","source":"instructions/AGENTS.md"}],"configs":[{"target":"opencode-config","source":"config/opencode.json"}]}`
@@ -430,7 +430,7 @@ func cliConfigCollisionEnvironment(t *testing.T) (destination, source string, or
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(source, []byte(`{"default_agent":"naru-orchestrator"}`), 0o644); err != nil {
+	if err := os.WriteFile(source, []byte(`{"default_agent":"naru"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	manifest := `{"schema_version":1,"id":"test-catalog","version":"0.1.0","projections":[],"configs":[{"target":"opencode-config","source":"config/opencode.json"}]}`
