@@ -887,6 +887,32 @@ func TestPlanDigestAndExpect(t *testing.T) {
 	}
 }
 
+func TestPlanDigestBindsSourceContentWhenActionsMatch(t *testing.T) {
+	_, repo := testEnvironment(t)
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	reviewed := mustPlan(t, "all")
+	if err := os.WriteFile(filepath.Join(repo, "skills", "example", "SKILL.md"), []byte("---\nname: example\ndescription: swapped after review\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed := mustPlan(t, "all")
+	if actionByIDOrFail(t, changed, "skill/agents/example").Action != actionByIDOrFail(t, reviewed, "skill/agents/example").Action {
+		t.Fatal("test setup: the action itself changed")
+	}
+	if changed.Digest == reviewed.Digest {
+		t.Fatal("digest did not change when source content changed under an identical plan")
+	}
+	paths, _ := ResolvePaths()
+	destination, _ := skillDestination(paths, "agents", "example")
+	if _, err := ApplyWithOptions("all", "test", ApplyOptions{ExpectDigest: reviewed.Digest}); !hasCode(err, CodePlanChanged) {
+		t.Fatalf("stale source applied: %v", err)
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale source mutated destination: %v", err)
+	}
+}
+
 func mustPlan(t *testing.T, target string) PlanResult {
 	t.Helper()
 	plan, err := Plan(target)

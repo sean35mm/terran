@@ -441,7 +441,12 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 			clean = false
 		}
 	}
-	plan := PlanResult{SchemaVersion: SchemaVersion, Clean: clean, Actions: actions, jsonFiles: map[string]string{}, collisions: map[string]string{}}
+	plan := PlanResult{SchemaVersion: SchemaVersion, Clean: clean, Actions: actions, jsonFiles: map[string]string{}, collisions: map[string]string{}, sources: map[string]string{}}
+	for _, action := range actions {
+		if hash, ok := actionSourceHash(catalogs, action); ok {
+			plan.sources[action.ID] = hash
+		}
+	}
 	for target, file := range jsonFiles {
 		plan.jsonFiles[target] = file.hash
 	}
@@ -462,7 +467,8 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 // PlanDigest identifies a plan and the catalogs it was computed from: sha256
 // over the canonical JSON of the actions sorted by item id, a newline, the
 // catalogs fingerprint, and one "\n<id> <hash>" line per blocked collision
-// (sorted by id) binding the colliding content a decision was reviewed against.
+// (sorted by id) binding the colliding content a decision was reviewed against,
+// then one "\nsource <id> <hash>" line per desired item binding its catalog content.
 func PlanDigest(plan PlanResult, catalogsFingerprint string) string {
 	actions := append([]Action{}, plan.Actions...)
 	sort.Slice(actions, func(i, j int) bool { return actions[i].ID < actions[j].ID })
@@ -473,7 +479,34 @@ func PlanDigest(plan PlanResult, catalogsFingerprint string) string {
 			data = append(data, "\n"+action.ID+" "+hash...)
 		}
 	}
+	for _, action := range actions {
+		if hash, ok := plan.sources[action.ID]; ok {
+			data = append(data, "\nsource "+action.ID+" "+hash...)
+		}
+	}
 	return hashBytes(data)
+}
+
+// actionSourceHash returns the hash of the catalog content an action would
+// install, or false for items no catalog declares (removals).
+func actionSourceHash(catalogs Catalogs, action Action) (string, bool) {
+	loaded, err := catalogs.catalog(action.Catalog)
+	if err != nil {
+		return "", false
+	}
+	switch action.Kind {
+	case "skill":
+		hash, ok := loaded.SkillHashes[action.Skill]
+		return hash, ok
+	case "json-keys":
+		value, ok := loaded.JSONKeyValues[action.Target][action.Name]
+		if !ok {
+			return "", false
+		}
+		return hashBytes(value), true
+	default:
+		return managedSourceHash(loaded, action.Kind, action.Target, action.Name)
+	}
 }
 
 // contentHash identifies what currently occupies a destination without

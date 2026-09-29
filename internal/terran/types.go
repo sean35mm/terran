@@ -150,6 +150,9 @@ type PlanResult struct {
 	// collisions maps each blocked_collision item id to a hash of the content
 	// at its destination, so the digest changes when that content does.
 	collisions map[string]string
+	// sources maps each desired item id to the hash of its catalog source, so
+	// the digest changes when reviewed content changes but the action does not.
+	sources map[string]string
 }
 
 type CollisionDecision string
