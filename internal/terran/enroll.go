@@ -62,49 +62,56 @@ func setHold(id string, hold bool) (Enrollment, error) {
 		if err != nil {
 			return err
 		}
-		result = enrollment
-		index := sort.SearchStrings(enrollment.Holds, id)
-		held := index < len(enrollment.Holds) && enrollment.Holds[index] == id
-		if held == hold {
-			return nil
-		}
-		if hold {
-			plan, err := planEnrolled(paths, enrollment, "all")
-			if err != nil {
-				return err
-			}
-			known := false
-			for _, action := range plan.Actions {
-				known = known || action.ID == id
-			}
-			if !known {
-				return Coded(CodeUnknownItem, "run terran plan --json to list item ids", fmt.Errorf("unknown item %q", id))
-			}
-			result.Holds = append(append(append([]string(nil), enrollment.Holds[:index]...), id), enrollment.Holds[index:]...)
-		} else {
-			result.Holds = append(append([]string(nil), enrollment.Holds[:index]...), enrollment.Holds[index+1:]...)
-		}
-		if len(result.Holds) == 0 {
-			result.Holds = nil
-		}
-		data, err := marshalJSON(result)
-		if err != nil {
-			return err
-		}
-		writeResult, writeErr := atomicPrivateJSONBytes(paths.ConfigFile, data, nil)
-		if writeErr != nil {
-			committed := false
-			if writeResult.renamed {
-				installed, _, verifyErr := readTrustedFile(paths.ConfigFile, "installed enrollment config", 1<<20, 0o600)
-				committed = verifyErr == nil && bytes.Equal(installed, data)
-			}
-			if !committed {
-				return writeErr
-			}
-		}
-		return nil
+		result, err = holdLocked(paths, enrollment, id, hold)
+		return err
 	})
 	return result, err
+}
+
+// holdLocked adds or removes one hold and rewrites the enrollment; the caller
+// holds the Terran lock.
+func holdLocked(paths Paths, enrollment Enrollment, id string, hold bool) (Enrollment, error) {
+	result := enrollment
+	index := sort.SearchStrings(enrollment.Holds, id)
+	held := index < len(enrollment.Holds) && enrollment.Holds[index] == id
+	if held == hold {
+		return result, nil
+	}
+	if hold {
+		plan, err := planEnrolled(paths, enrollment, "all")
+		if err != nil {
+			return Enrollment{}, err
+		}
+		known := false
+		for _, action := range plan.Actions {
+			known = known || action.ID == id
+		}
+		if !known {
+			return Enrollment{}, Coded(CodeUnknownItem, "run terran plan --json to list item ids", fmt.Errorf("unknown item %q", id))
+		}
+		result.Holds = append(append(append([]string(nil), enrollment.Holds[:index]...), id), enrollment.Holds[index:]...)
+	} else {
+		result.Holds = append(append([]string(nil), enrollment.Holds[:index]...), enrollment.Holds[index+1:]...)
+	}
+	if len(result.Holds) == 0 {
+		result.Holds = nil
+	}
+	data, err := marshalJSON(result)
+	if err != nil {
+		return Enrollment{}, err
+	}
+	writeResult, writeErr := atomicPrivateJSONBytes(paths.ConfigFile, data, nil)
+	if writeErr != nil {
+		committed := false
+		if writeResult.renamed {
+			installed, _, verifyErr := readTrustedFile(paths.ConfigFile, "installed enrollment config", 1<<20, 0o600)
+			committed = verifyErr == nil && bytes.Equal(installed, data)
+		}
+		if !committed {
+			return Enrollment{}, writeErr
+		}
+	}
+	return result, nil
 }
 
 // EnrollmentMissing distinguishes an absent enrollment from an unsafe or

@@ -572,3 +572,250 @@ func TestBackupPublicationRacesPreserveUnexpectedBytes(t *testing.T) {
 		}
 	})
 }
+
+func TestDecideReplaceBacksUpAndInstallsCatalogVersion(t *testing.T) {
+	t.Run("instruction", func(t *testing.T) {
+		_, repo := instructionEnvironment(t, "claude-global")
+		prepareInstructionParents(t)
+		paths, _ := ResolvePaths()
+		destination, _ := instructionDestination(paths, "claude-global")
+		original := []byte("mine\n")
+		if err := os.WriteFile(destination, original, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
+			t.Fatal(err)
+		}
+		result, err := ApplyWithOptions("all", "test", ApplyOptions{Decisions: map[string]CollisionDecision{"instruction/claude-global": CollisionReplace}})
+		if err != nil || actionByIDOrFail(t, result, "instruction/claude-global").Action != "replace" {
+			t.Fatalf("apply: %#v %v", result, err)
+		}
+		if got, _ := os.ReadFile(destination); string(got) != "# claude-global\n" {
+			t.Fatalf("destination: %q", got)
+		}
+		if got, _ := os.ReadFile(instructionBackup(paths, "claude-global")); !bytes.Equal(got, original) {
+			t.Fatalf("backup: %q", got)
+		}
+	})
+	t.Run("file", func(t *testing.T) {
+		_, repo := fileEnvironment(t)
+		writeCatalogWithFiles(t, repo, "test-catalog", nil, []FileItem{{Target: "claude-agent", Name: "a.md", Source: "files/a.md"}})
+		paths, _ := ResolvePaths()
+		destination, _ := managedFileDestination(paths, "file", "claude-agent", "a.md")
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		original := []byte("my agent\n")
+		if err := os.WriteFile(destination, original, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ApplyWithOptions("all", "test", ApplyOptions{Decisions: map[string]CollisionDecision{"file/claude-agent/a.md": CollisionReplace}}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(destination); string(got) != "# a.md\n" {
+			t.Fatalf("destination: %q", got)
+		}
+		backup := managedBackup(paths, "file", "claude-agent", "a.md")
+		if got, _ := os.ReadFile(backup); !bytes.Equal(got, original) {
+			t.Fatalf("backup: %q", got)
+		}
+		if managed := loadTestReceipt(t).Managed; len(managed) != 1 || managed[0].Origin != "adopted" || managed[0].Backup != backup {
+			t.Fatalf("receipt: %#v", managed)
+		}
+	})
+	t.Run("json key restores the original on removal", func(t *testing.T) {
+		home, repo := fileEnvironment(t)
+		settings := claudeSettings(t, home, `{"model":"sonnet","theme":"dark"}`, 0o644)
+		writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"claude-settings": `{"model":"opus"}`})
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
+			t.Fatal(err)
+		}
+		if result, err := Apply("all", "test"); err != nil || !blocked(result) {
+			t.Fatalf("undecided collision must block: %#v %v", result, err)
+		}
+		id := "json-keys/claude-settings/model"
+		if _, err := ApplyWithOptions("all", "test", ApplyOptions{Decisions: map[string]CollisionDecision{id: CollisionReplace}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := decodedJSON(t, settings); got["model"] != "opus" || got["theme"] != "dark" {
+			t.Fatalf("settings: %#v", got)
+		}
+		if keys := loadTestReceipt(t).JSONKeys; len(keys) != 1 || keys[0].Origin != "adopted" || string(keys[0].OriginalValue) != `"sonnet"` {
+			t.Fatalf("receipt: %#v", keys)
+		}
+		writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{})
+		if plan, _ := Plan("all"); actionByIDOrFail(t, plan, id).Action != "restore" {
+			t.Fatalf("removal plan: %#v", plan)
+		}
+		if _, err := Apply("all", "test"); err != nil {
+			t.Fatal(err)
+		}
+		if got := decodedJSON(t, settings); got["model"] != "sonnet" || got["theme"] != "dark" {
+			t.Fatalf("original value not restored: %#v", got)
+		}
+		if keys := loadTestReceipt(t).JSONKeys; len(keys) != 0 {
+			t.Fatalf("receipt kept restored key: %#v", keys)
+		}
+	})
+	t.Run("skill directory", func(t *testing.T) {
+		_, repo := testEnvironment(t)
+		paths, _ := ResolvePaths()
+		destination, _ := skillDestination(paths, "agents", "example")
+		if err := os.MkdirAll(destination, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(destination, "mine.txt"), []byte("mine"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
+			t.Fatal(err)
+		}
+		if result, err := Apply("agents", "test"); err != nil || !blocked(result) {
+			t.Fatalf("undecided collision must block: %#v %v", result, err)
+		}
+		if _, err := ApplyWithOptions("agents", "test", ApplyOptions{Decisions: map[string]CollisionDecision{"skill/agents/example": CollisionReplace}}); err != nil {
+			t.Fatal(err)
+		}
+		source := actionByIDOrFail(t, mustPlan(t, "agents"), "skill/agents/example").Source
+		if !exactSymlink(destination, source) {
+			t.Fatal("catalog skill was not projected")
+		}
+		if got, _ := os.ReadFile(filepath.Join(paths.BackupDir, "skill", "agents", "example", "original", "mine.txt")); string(got) != "mine" {
+			t.Fatalf("skill backup: %q", got)
+		}
+		if plan, _ := Plan("agents"); !plan.Clean {
+			t.Fatalf("plan after replace: %#v", plan)
+		}
+	})
+}
+
+func TestDecideKeepHoldsWithoutTouchingDestination(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global", "opencode-global")
+	prepareInstructionParents(t)
+	paths, _ := ResolvePaths()
+	destination, _ := instructionDestination(paths, "claude-global")
+	original := []byte("mine\n")
+	if err := os.WriteFile(destination, original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyWithOptions("all", "test", ApplyOptions{Decisions: map[string]CollisionDecision{"instruction/claude-global": CollisionKeep}})
+	if err != nil || actionByIDOrFail(t, result, "instruction/claude-global").Action != "held" {
+		t.Fatalf("apply: %#v %v", result, err)
+	}
+	if got, _ := os.ReadFile(destination); !bytes.Equal(got, original) {
+		t.Fatalf("kept destination changed: %q", got)
+	}
+	other, _ := instructionDestination(paths, "opencode-global")
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("other action not applied: %v", err)
+	}
+	enrollment, _ := LoadEnrollment(paths)
+	if len(enrollment.Holds) != 1 || enrollment.Holds[0] != "instruction/claude-global" {
+		t.Fatalf("holds: %v", enrollment.Holds)
+	}
+	if plan, _ := Plan("all"); !plan.Clean || actionByIDOrFail(t, plan, "instruction/claude-global").Action != "held" {
+		t.Fatalf("plan after keep: %#v", plan)
+	}
+}
+
+func TestDecideForItemOutsideCollisionsIsUsageErrorWithoutMutation(t *testing.T) {
+	_, repo := testEnvironment(t)
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := ResolvePaths()
+	destination, _ := skillDestination(paths, "agents", "example")
+	for _, id := range []string{"skill/agents/example", "skill/agents/missing"} {
+		_, err := ApplyWithOptions("all", "test", ApplyOptions{Decisions: map[string]CollisionDecision{id: CollisionKeep}})
+		if !hasCode(err, CodeUsage) || !strings.Contains(err.Error(), id) {
+			t.Fatalf("%s: %v", id, err)
+		}
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected decision mutated: %v", err)
+	}
+	if _, err := os.Lstat(paths.Receipt); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected decision wrote a receipt: %v", err)
+	}
+}
+
+func TestDecisionsArePreflightedTogether(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global", "opencode-global")
+	prepareInstructionParents(t)
+	paths, _ := ResolvePaths()
+	first, _ := instructionDestination(paths, "claude-global")
+	second, _ := instructionDestination(paths, "opencode-global")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("mine\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ApplyWithOptions("all", "test", ApplyOptions{
+		Decisions: map[string]CollisionDecision{"instruction/claude-global": CollisionReplace, "instruction/opencode-global": CollisionReplace},
+		ConfirmPlan: func(PlanResult) error {
+			return os.WriteFile(second, []byte("changed after decision\n"), 0o640)
+		},
+	})
+	if err == nil {
+		t.Fatal("second decision must fail preflight")
+	}
+	if got, _ := os.ReadFile(first); string(got) != "mine\n" {
+		t.Fatalf("first decision applied despite second failing: %q", got)
+	}
+	if _, err := os.Lstat(paths.Receipt); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("receipt written: %v", err)
+	}
+}
+
+func TestPlanDigestAndExpect(t *testing.T) {
+	_, repo := testEnvironment(t)
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Plan("all")
+	if err != nil || len(first.Digest) != 64 {
+		t.Fatalf("digest: %q %v", first.Digest, err)
+	}
+	if second, _ := Plan("all"); second.Digest != first.Digest {
+		t.Fatal("digest is not stable across plans")
+	}
+	paths, _ := ResolvePaths()
+	destination, _ := skillDestination(paths, "agents", "example")
+	if _, err := ApplyWithOptions("all", "test", ApplyOptions{ExpectDigest: "0000"}); !hasCode(err, CodePlanChanged) {
+		t.Fatalf("stale digest: %v", err)
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale digest mutated: %v", err)
+	}
+	if _, err := os.Lstat(paths.Receipt); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale digest wrote a receipt: %v", err)
+	}
+	result, err := ApplyWithOptions("all", "test", ApplyOptions{ExpectDigest: first.Digest})
+	if err != nil || result.Digest != first.Digest || !exactSymlink(destination, actionByIDOrFail(t, first, "skill/agents/example").Source) {
+		t.Fatalf("matching digest: %#v %v", result, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "skills", "example", "SKILL.md"), []byte("---\nname: example\ndescription: changed\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if changed, _ := Plan("all"); changed.Digest == first.Digest {
+		t.Fatal("digest did not change with the catalog source")
+	}
+}
+
+func mustPlan(t *testing.T, target string) PlanResult {
+	t.Helper()
+	plan, err := Plan(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}

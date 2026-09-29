@@ -419,7 +419,18 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 	for target, file := range jsonFiles {
 		plan.jsonFiles[target] = file.hash
 	}
+	plan.Digest = PlanDigest(plan, catalogs.Fingerprint)
 	return plan, nil
+}
+
+// PlanDigest identifies a plan and the catalogs it was computed from: sha256
+// over the canonical JSON of the actions sorted by item id, a newline, and the
+// catalogs fingerprint.
+func PlanDigest(plan PlanResult, catalogsFingerprint string) string {
+	actions := append([]Action{}, plan.Actions...)
+	sort.Slice(actions, func(i, j int) bool { return actions[i].ID < actions[j].ID })
+	data, _ := json.Marshal(actions) // Action holds only strings; Marshal cannot fail
+	return hashBytes(append(append(data, '\n'), catalogsFingerprint...))
 }
 
 func classifyInstruction(paths Paths, action Action, sourceHash string, prior ReceiptManaged, owned bool) (string, string) {
@@ -663,6 +674,8 @@ type resolvedCollision struct {
 	backup          string
 	backupInfo      os.FileInfo
 	backupHash      string
+	originalValue   json.RawMessage // json-keys: the replaced unowned value
+	fileHash        string          // json-keys: settings file the value was read from
 }
 
 func Apply(target, buildVersion string) (PlanResult, error) {
@@ -691,31 +704,72 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		if err != nil {
 			return err
 		}
+		if options.ExpectDigest != "" && options.ExpectDigest != result.Digest {
+			return Coded(CodePlanChanged, "run terran plan --json again and review", fmt.Errorf("plan digest %s does not match the expected digest", result.Digest))
+		}
+		decided := make([]string, 0, len(options.Decisions))
+		for id, decision := range options.Decisions {
+			if decision != CollisionReplace && decision != CollisionKeep {
+				return Coded(CodeUsage, "", fmt.Errorf("invalid decision %q for %s", decision, id))
+			}
+			decided = append(decided, id)
+		}
+		sort.Strings(decided)
+		for _, id := range decided {
+			if actionByID(result, id).Action != "blocked_collision" {
+				return Coded(CodeUsage, "run terran plan --json to list blocked_collision items", fmt.Errorf("%s is not a blocked_collision in the current plan", id))
+			}
+		}
 		resolved := map[string]resolvedCollision{}
+		var kept []string
 		for i := range result.Actions {
 			action := result.Actions[i]
-			if action.Action != "blocked_collision" || options.ResolveCollision == nil {
+			decision, hasDecision := options.Decisions[action.ID]
+			if action.Action != "blocked_collision" || (!hasDecision && options.ResolveCollision == nil) {
 				continue
 			}
-			loaded, err := catalogs.catalog(action.Catalog)
-			if err != nil {
-				return err
-			}
-			state, eligible := resolvableCollision(paths, loaded, action)
-			if !eligible {
-				continue
-			}
-			decision, err := options.ResolveCollision(action)
-			if err != nil {
-				return fmt.Errorf("resolve collision for %s: %w", action.Target, err)
+			var state resolvedCollision
+			if decision != CollisionKeep {
+				loaded, err := catalogs.catalog(action.Catalog)
+				if err != nil {
+					return err
+				}
+				var eligible bool
+				state, eligible = resolvableCollision(paths, loaded, action)
+				if !eligible {
+					if hasDecision && action.Kind == "skill" {
+						result.Actions[i].Reason = "backup not possible"
+					}
+					continue
+				}
+				if action.Kind == "json-keys" && state.fileHash != result.jsonFiles[action.Target] {
+					return planChanged(action.Destination)
+				}
+				if !hasDecision {
+					decision, err = options.ResolveCollision(action)
+					if err != nil {
+						return fmt.Errorf("resolve collision for %s: %w", action.Target, err)
+					}
+				}
 			}
 			switch decision {
 			case CollisionReplace:
 				result.Actions[i].Action = "replace"
-				result.Actions[i].Reason = "replace differing existing file; preserve original in private backup"
+				switch action.Kind {
+				case "skill":
+					result.Actions[i].Reason = "replace existing skill; move it to a private backup (not restored on removal)"
+				case "json-keys":
+					result.Actions[i].Reason = "replace differing existing key; original value is restored on removal"
+				default:
+					result.Actions[i].Reason = "replace differing existing file; preserve original in private backup"
+				}
 			case CollisionSkip:
 				result.Actions[i].Action = "skip"
 				result.Actions[i].Reason = "keep differing existing file"
+			case CollisionKeep:
+				result.Actions[i].Action = "held"
+				result.Actions[i].Reason = "kept existing destination; held on this machine"
+				kept = append(kept, action.ID)
 			case CollisionAbort:
 				return ErrApplyAborted
 			default:
@@ -742,6 +796,10 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		for _, managed := range receipt.Managed {
 			ownedInstructions[ItemID(managed.Kind, managed.Target, managed.Name)] = managed
 		}
+		ownedJSONKeys := map[string]ReceiptJSONKey{}
+		for _, entry := range receipt.JSONKeys {
+			ownedJSONKeys[ItemID("json-keys", entry.Target, entry.Key)] = entry
+		}
 		for _, action := range result.Actions {
 			if err := preflightAction(paths, catalogs, action, ownedSkills, ownedInstructions, resolved); err != nil {
 				return err
@@ -761,9 +819,9 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			if err := preflightAction(paths, catalogs, action, ownedSkills, ownedInstructions, resolved); err != nil {
 				return errors.Join(err, rollbackSkills(skillRollbacks))
 			}
-			rollback := prepareSkillRollback(action, ownedSkills)
+			rollback := prepareSkillRollback(action, ownedSkills, resolved)
 			skillRollbacks = append(skillRollbacks, rollback)
-			if err := mutateSkill(paths, catalogs, action, ownedSkills); err != nil {
+			if err := mutateSkill(paths, catalogs, action, ownedSkills, resolved); err != nil {
 				return errors.Join(err, rollbackSkills(skillRollbacks))
 			}
 		}
@@ -802,7 +860,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			}
 		}
 		for _, jsonTarget := range jsonTargets {
-			rollback, err := mutateJSONKeys(paths, catalogs, result, jsonTarget)
+			rollback, err := mutateJSONKeys(paths, catalogs, result, jsonTarget, ownedJSONKeys)
 			rollbacks = append(rollbacks, rollback)
 			if err != nil {
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
@@ -854,10 +912,8 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				newReceipt.Managed = append(newReceipt.Managed, old)
 			}
 		}
-		ownedJSONKeys := map[string]ReceiptJSONKey{}
 		for _, old := range receipt.JSONKeys {
 			id := ItemID("json-keys", old.Target, old.Key)
-			ownedJSONKeys[id] = old
 			if !selectedManaged(target, "json-keys", old.Target) || heldIDs[id] {
 				newReceipt.JSONKeys = append(newReceipt.JSONKeys, old)
 			}
@@ -865,7 +921,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		for _, loaded := range catalogs.list() {
 			for _, projection := range loaded.Manifest.Projections {
 				for _, destinationTarget := range projection.Targets {
-					if !selectedSkill(target, destinationTarget) || untouched("skill", destinationTarget, projection.Skill, projection.Platforms) {
+					if !selectedSkill(target, destinationTarget) || untouched("skill", destinationTarget, projection.Skill, projection.Platforms) || actionByID(result, ItemID("skill", destinationTarget, projection.Skill)).Action == "skip" {
 						continue
 					}
 					destination, _ := skillDestination(paths, destinationTarget, projection.Skill)
@@ -918,8 +974,10 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 					entry := ReceiptJSONKey{Catalog: loaded.Manifest.ID, Target: item.Target, Key: key, AppliedHash: hashBytes(value), Origin: "created", AppliedAt: now, TerranBuildVersion: buildVersion}
 					if prior, owned := ownedJSONKeys[id]; owned {
 						entry.Origin, entry.OriginalValue = prior.Origin, prior.OriginalValue
-					} else if actionByID(result, id).Action == "adopt" {
+					} else if action := actionByID(result, id); action.Action == "adopt" {
 						entry.Origin, entry.OriginalValue = "adopted", value
+					} else if action.Action == "replace" {
+						entry.Origin, entry.OriginalValue = "adopted", resolved[managedActionKey(action)].originalValue
 					}
 					newReceipt.JSONKeys = append(newReceipt.JSONKeys, entry)
 				}
@@ -974,7 +1032,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			}
 		}
 		for _, action := range result.Actions {
-			if action.Kind == "skill" || action.Action != "restore" {
+			if action.Kind == "skill" || action.Kind == "json-keys" || action.Action != "restore" {
 				continue
 			}
 			backup := managedBackup(paths, action.Kind, action.Target, action.Name)
@@ -987,6 +1045,13 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			}
 			if err := removeInstructionBackup(backup); err != nil {
 				appendActionWarning(&result, action, "backup cleanup warning: "+err.Error())
+			}
+		}
+		// Kept collisions were never touched, so their holds are written last.
+		for _, id := range kept {
+			var holdErr error
+			if enrollment, holdErr = holdLocked(paths, enrollment, id, true); holdErr != nil {
+				return fmt.Errorf("hold %s: %w", id, holdErr)
 			}
 		}
 		return nil
@@ -1121,6 +1186,12 @@ func managedActionKey(action Action) string { return action.ID }
 
 func resolvableCollision(paths Paths, loaded LoadedManifest, action Action) (resolvedCollision, bool) {
 	var state resolvedCollision
+	switch action.Kind {
+	case "skill":
+		return resolvableSkillCollision(paths, loaded, action)
+	case "json-keys":
+		return resolvableJSONKeyCollision(loaded, action)
+	}
 	if (action.Kind != "instruction" && action.Kind != "config" && action.Kind != "file") || action.Action != "blocked_collision" {
 		return state, false
 	}
@@ -1166,6 +1237,61 @@ func resolvableCollision(paths Paths, loaded LoadedManifest, action Action) (res
 	return state, true
 }
 
+// resolvableSkillCollision accepts an existing unowned skill directory or link
+// that can be renamed into a private backup on the same filesystem.
+func resolvableSkillCollision(paths Paths, loaded LoadedManifest, action Action) (resolvedCollision, bool) {
+	if action.Action != "blocked_collision" {
+		return resolvedCollision{}, false
+	}
+	if source, desired := loaded.Sources[action.Skill]; !desired || source != action.Source || validateTrustedSource(loaded.Repository, source) != nil {
+		return resolvedCollision{}, false
+	}
+	if validateTargetRoot(filepath.Dir(action.Destination)) != nil {
+		return resolvedCollision{}, false
+	}
+	info, err := os.Lstat(action.Destination)
+	if err != nil || (!info.IsDir() && info.Mode()&os.ModeSymlink == 0) {
+		return resolvedCollision{}, false
+	}
+	backup := filepath.Join(paths.BackupDir, "skill", action.Target, action.Skill, "original")
+	if !safeBackupParent(paths, filepath.Dir(backup)) {
+		return resolvedCollision{}, false
+	}
+	if _, err := os.Lstat(backup); !errors.Is(err, os.ErrNotExist) {
+		return resolvedCollision{}, false
+	}
+	ancestor := filepath.Dir(backup)
+	for {
+		ancestorInfo, err := os.Lstat(ancestor)
+		if err == nil {
+			if !sameDevice(info, ancestorInfo) {
+				return resolvedCollision{}, false
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return resolvedCollision{}, false
+		}
+		ancestor = filepath.Dir(ancestor)
+	}
+	return resolvedCollision{destinationInfo: info, backup: backup}, true
+}
+
+// resolvableJSONKeyCollision accepts a key holding a different, valid value in
+// a readable settings file and remembers that value for restoration.
+func resolvableJSONKeyCollision(loaded LoadedManifest, action Action) (resolvedCollision, bool) {
+	value, desired := loaded.JSONKeyValues[action.Target][action.Name]
+	if action.Action != "blocked_collision" || !desired || loaded.JSONKeySources[action.Target] != action.Source {
+		return resolvedCollision{}, false
+	}
+	file := inspectJSONSettings(action.Destination)
+	current, present := file.values[action.Name]
+	if file.blocked != "" || !present || bytes.Equal(current, value) {
+		return resolvedCollision{}, false
+	}
+	return resolvedCollision{originalValue: current, fileHash: file.hash}, true
+}
+
 func safeBackupParent(paths Paths, parent string) bool {
 	if !contained(paths.StateDir, parent) {
 		return false
@@ -1185,7 +1311,13 @@ func safeBackupParent(paths Paths, parent string) bool {
 }
 
 func preflightResolvedCollision(paths Paths, loaded LoadedManifest, action Action, expected resolvedCollision) error {
-	fresh, eligible := resolvableCollision(paths, loaded, Action{ID: action.ID, Kind: action.Kind, Action: "blocked_collision", Target: action.Target, Name: action.Name, Source: action.Source, Destination: action.Destination})
+	fresh, eligible := resolvableCollision(paths, loaded, Action{ID: action.ID, Kind: action.Kind, Action: "blocked_collision", Skill: action.Skill, Target: action.Target, Name: action.Name, Source: action.Source, Destination: action.Destination})
+	if action.Kind == "skill" {
+		if !eligible || !os.SameFile(fresh.destinationInfo, expected.destinationInfo) {
+			return fmt.Errorf("skill collision changed during apply")
+		}
+		return nil
+	}
 	if !eligible || fresh.originalHash != expected.originalHash || fresh.originalMode != expected.originalMode || !os.SameFile(fresh.destinationInfo, expected.destinationInfo) {
 		return fmt.Errorf("managed-file collision changed during apply")
 	}
@@ -1213,6 +1345,9 @@ func preflightAction(paths Paths, catalogs Catalogs, action Action, ownedSkills 
 	if action.Kind == "json-keys" {
 		// Verified per settings file by verifyJSONSettings.
 		return nil
+	}
+	if state, ok := resolved[managedActionKey(action)]; ok && action.Kind == "skill" {
+		return preflightResolvedCollision(paths, loaded, action, state)
 	}
 	if action.Kind == "skill" {
 		if source, desired := loaded.Sources[action.Skill]; desired && source == action.Source {
@@ -1265,10 +1400,14 @@ type skillRollback struct {
 	beforeSource string
 	afterSource  string
 	createdDirs  []string
+	backup       string // collision replacement: where the original was moved
 }
 
-func prepareSkillRollback(action Action, owned map[string]ReceiptProjection) skillRollback {
+func prepareSkillRollback(action Action, owned map[string]ReceiptProjection, resolved map[string]resolvedCollision) skillRollback {
 	rollback := skillRollback{action: action.Action, destination: action.Destination, afterSource: action.Source}
+	if state, ok := resolved[managedActionKey(action)]; ok && action.Action == "replace" {
+		rollback.backup = state.backup
+	}
 	if prior := owned[pairKey(action.Skill, action.Target)]; prior.Skill != "" {
 		rollback.beforeSource = prior.Source
 	}
@@ -1302,7 +1441,19 @@ func rollbackSkills(rollbacks []skillRollback) error {
 				}
 			}
 		case "replace":
-			if exactSymlink(rollback.destination, rollback.afterSource) {
+			if rollback.backup != "" {
+				if exactSymlink(rollback.destination, rollback.afterSource) {
+					if err := os.Remove(rollback.destination); err != nil {
+						rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback replacement projection %s: %w", rollback.destination, err))
+					}
+				}
+				_, destinationErr := os.Lstat(rollback.destination)
+				if _, backupErr := os.Lstat(rollback.backup); backupErr == nil && errors.Is(destinationErr, os.ErrNotExist) {
+					if err := os.Rename(rollback.backup, rollback.destination); err != nil {
+						rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback replaced skill %s: %w", rollback.destination, err))
+					}
+				}
+			} else if exactSymlink(rollback.destination, rollback.afterSource) {
 				if err := replaceSymlink(rollback.beforeSource, rollback.destination); err != nil {
 					rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback replaced projection %s: %w", rollback.destination, err))
 				}
@@ -1318,7 +1469,7 @@ func rollbackSkills(rollbacks []skillRollback) error {
 	return errors.Join(rollbackErrs...)
 }
 
-func mutateSkill(paths Paths, catalogs Catalogs, action Action, owned map[string]ReceiptProjection) error {
+func mutateSkill(paths Paths, catalogs Catalogs, action Action, owned map[string]ReceiptProjection, resolved map[string]resolvedCollision) error {
 	if action.Action == "noop" || action.Action == "record" || action.Action == "adopt" {
 		return nil
 	}
@@ -1334,6 +1485,20 @@ func mutateSkill(paths Paths, catalogs Catalogs, action Action, owned map[string
 		if action.Action == "create" {
 			if _, err := os.Lstat(action.Destination); !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("projection changed during apply")
+			}
+			if err := os.Symlink(action.Source, action.Destination); err != nil {
+				return err
+			}
+		} else if state, collision := resolved[managedActionKey(action)]; collision {
+			// Collision replacement: move the unowned skill aside, then project.
+			if info, err := os.Lstat(action.Destination); err != nil || !os.SameFile(info, state.destinationInfo) {
+				return fmt.Errorf("projection changed during apply")
+			}
+			if err := ensurePrivateDir(filepath.Dir(state.backup)); err != nil {
+				return err
+			}
+			if err := os.Rename(action.Destination, state.backup); err != nil {
+				return fmt.Errorf("backup not possible: %w", err)
 			}
 			if err := os.Symlink(action.Source, action.Destination); err != nil {
 				return err

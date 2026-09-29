@@ -188,3 +188,11 @@ func splitRelativePath(path string) []string {
 	}
 	return parts
 }
+
+// sameDevice reports whether two files live on one filesystem, so a rename
+// between them cannot fail with a cross-device error.
+func sameDevice(a, b os.FileInfo) bool {
+	first, firstOK := a.Sys().(*syscall.Stat_t)
+	second, secondOK := b.Sys().(*syscall.Stat_t)
+	return firstOK && secondOK && uint64(first.Dev) == uint64(second.Dev)
+}

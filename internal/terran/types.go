@@ -136,6 +136,7 @@ type Action struct {
 type PlanResult struct {
 	SchemaVersion int      `json:"schema_version"`
 	Clean         bool     `json:"clean"`
+	Digest        string   `json:"digest"`
 	Actions       []Action `json:"actions"`
 	// jsonFiles maps each json-keys target the plan inspected to the sha256
 	// of the whole settings file ("" when missing); apply refuses to write
@@ -149,13 +150,20 @@ const (
 	CollisionReplace CollisionDecision = "replace"
 	CollisionSkip    CollisionDecision = "skip"
 	CollisionAbort   CollisionDecision = "abort"
+	// CollisionKeep leaves the destination untouched and holds the item.
+	CollisionKeep CollisionDecision = "keep"
 )
 
-// ApplyOptions enables human decisions inside ApplyWithOptions' lock. Callbacks
-// receive plan metadata, never file contents.
+// ApplyOptions enables decisions inside ApplyWithOptions' lock. Callbacks
+// receive plan metadata, never file contents. Decisions maps item ids to
+// CollisionReplace or CollisionKeep and takes precedence over ResolveCollision;
+// each id must be a blocked collision in the plan. ExpectDigest, when set,
+// must equal the digest of the plan computed under the lock.
 type ApplyOptions struct {
 	ResolveCollision func(Action) (CollisionDecision, error)
 	ConfirmPlan      func(PlanResult) error
+	Decisions        map[string]CollisionDecision
+	ExpectDigest     string
 }
 
 type StatusItem struct {

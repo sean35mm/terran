@@ -187,11 +187,14 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 	var result terran.PlanResult
 	var err error
 	if command == "apply" {
-		result, err = terran.Apply(options.target, version)
+		result, err = terran.ApplyWithOptions(options.target, version, terran.ApplyOptions{Decisions: options.decisions, ExpectDigest: options.expect})
 	} else {
 		result, err = terran.Plan(options.target)
 	}
 	if err != nil {
+		if code, _ := terran.ErrorCode(err); code == terran.CodeUsage {
+			return usage(stdout, stderr, err.Error(), options.json)
+		}
 		if options.json {
 			return jsonOperational(stdout, stderr, command+" failed", err)
 		}
@@ -215,6 +218,9 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 				name = action.Target
 			}
 			fmt.Fprintf(stdout, "%-18s kind=%-11s target=%-16s name=%-24s source=%s destination=%s reason=%s\n", action.Action, action.Kind, action.Target, name, action.Source, action.Destination, reason)
+		}
+		if command == "plan" {
+			fmt.Fprintf(stdout, "digest=%s\n", result.Digest)
 		}
 	}
 	for _, action := range result.Actions {
@@ -283,6 +289,9 @@ type commandOptions struct {
 	target  string
 	replace bool
 	json    bool
+
+	decisions map[string]terran.CollisionDecision
+	expect    string
 }
 
 func newFlags(name string, output io.Writer) (*flag.FlagSet, *commandOptions) {
@@ -297,6 +306,23 @@ func newFlags(name string, output io.Writer) (*flag.FlagSet, *commandOptions) {
 		fs.BoolVar(&options.replace, "replace", false, "replace a different existing enrollment; with the same repository, drop an overlay not given by --overlay")
 	case "plan", "apply", "status":
 		fs.StringVar(&options.target, "target", "all", "projection target: all, "+strings.Join(terran.TargetGroups(), ", "))
+	}
+	if name == "apply" {
+		fs.Func("decide", "resolve a blocked_collision item: ITEM_ID=replace|keep (repeatable); replace backs up the existing value and installs the catalog version, keep holds the item", func(value string) error {
+			id, decision, ok := strings.Cut(value, "=")
+			if !ok || id == "" || (decision != string(terran.CollisionReplace) && decision != string(terran.CollisionKeep)) {
+				return fmt.Errorf("want ITEM_ID=replace|keep")
+			}
+			if _, duplicate := options.decisions[id]; duplicate {
+				return fmt.Errorf("duplicate decision for %s", id)
+			}
+			if options.decisions == nil {
+				options.decisions = map[string]terran.CollisionDecision{}
+			}
+			options.decisions[id] = terran.CollisionDecision(decision)
+			return nil
+		})
+		fs.StringVar(&options.expect, "expect", "", "apply only if the plan digest equals DIGEST from terran plan")
 	}
 	fs.BoolVar(&options.json, "json", false, "emit one JSON object instead of human output")
 	fs.Usage = func() {
@@ -415,7 +441,7 @@ func printCommandIntro(w io.Writer, command string) {
 		"version": "Usage: terran version [--json]\nRead-only. Prints build metadata. Exit: 0 success, 1 output failure, 2 usage.\n\nFlags:",
 		"enroll":  "Usage: terran enroll --repo PATH [--name NAME] [--overlay PATH] [--replace] [--json]\nMutates private enrollment state; it never creates skill links, instruction files, or config files. Re-enrolling the same repository may rename it or add an overlay and keeps holds. Changing or dropping an overlay that still owns applied items fails with repository_mismatch. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
 		"plan":    "Usage: terran plan [--target " + targets + "] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
-		"apply":   "Usage: terran apply [--target " + targets + "] [--json]\nMutates only validated skill leaves, fixed instruction/config files, named files in fixed directories, owned top-level keys in fixed JSON settings files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
+		"apply":   "Usage: terran apply [--target " + targets + "] [--decide ITEM_ID=replace|keep]... [--expect DIGEST] [--json]\nUndecided collisions block (exit 3). A --decide for an item that is not a blocked_collision is a usage error and nothing is changed; a stale --expect fails with plan_changed. Mutates only validated skill leaves, fixed instruction/config files, named files in fixed directories, owned top-level keys in fixed JSON settings files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"status":  "Usage: terran status [--target " + targets + "] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
 		"hold":    "Usage: terran hold ITEM_ID [--json]\nMutates private enrollment state only. Pins an item id from terran plan --json so plan and apply never inspect or change it. Exit: 0 success, 1 operational failure (including unknown_item), 2 usage.\n\nFlags:",
 		"unhold":  "Usage: terran unhold ITEM_ID [--json]\nMutates private enrollment state only. Releases a held item; releasing an item that is not held succeeds. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",

@@ -142,6 +142,8 @@ func classifyJSONKey(file jsonSettings, key string, desired json.RawMessage, pri
 		switch {
 		case desired == nil && prior.Origin == "created":
 			return "remove", "created key is no longer in the catalog; delete it"
+		case desired == nil && hashBytes(prior.OriginalValue) != prior.AppliedHash:
+			return "restore", "replaced key is no longer in the catalog; restore its original value"
 		case desired == nil:
 			return "release", "adopted key is no longer in the catalog; drop ownership and keep its value"
 		case hashBytes(desired) == prior.AppliedHash:
@@ -201,7 +203,7 @@ func verifyJSONSettings(paths Paths, catalogs Catalogs, plan PlanResult, target 
 
 // mutateJSONKeys rewrites one settings file with every planned key change for
 // its target. The returned rollback restores the previous bytes.
-func mutateJSONKeys(paths Paths, catalogs Catalogs, plan PlanResult, target string) (instructionRollback, error) {
+func mutateJSONKeys(paths Paths, catalogs Catalogs, plan PlanResult, target string, owned map[string]ReceiptJSONKey) (instructionRollback, error) {
 	destination, err := jsonKeysDestination(paths, target)
 	if err != nil {
 		return instructionRollback{}, err
@@ -231,7 +233,7 @@ func mutateJSONKeys(paths Paths, catalogs Catalogs, plan PlanResult, target stri
 			continue
 		}
 		switch action.Action {
-		case "create", "update":
+		case "create", "update", "replace":
 			value, ok := loaded.JSONKeyValues[target][action.Name]
 			if !ok {
 				return rollback, fmt.Errorf("json key %s is no longer in the catalog", action.ID)
@@ -240,6 +242,8 @@ func mutateJSONKeys(paths Paths, catalogs Catalogs, plan PlanResult, target stri
 		case "remove":
 			delete(raw, action.Name)
 			changed = true
+		case "restore":
+			raw[action.Name], changed = owned[action.ID].OriginalValue, true
 		}
 	}
 	if !changed {

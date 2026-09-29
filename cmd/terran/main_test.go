@@ -412,3 +412,53 @@ func TestCLIEnrollOverlayJSONAndUnavailableOverlay(t *testing.T) {
 	}
 	assertJSONError(t, out.Bytes(), terran.CodeOverlayUnavailable, "plan failed", "clone the private catalog to "+overlay+" or re-enroll")
 }
+
+func TestCLIApplyDecideAndExpect(t *testing.T) {
+	destination, _, original := cliConfigCollisionEnvironment(t)
+	id := "config/opencode-config"
+	for _, args := range [][]string{
+		{"apply", "--decide", id},
+		{"apply", "--decide", id + "=abort"},
+		{"apply", "--decide", "=replace"},
+		{"apply", "--decide", id + "=keep", "--decide", id + "=replace"},
+		{"apply", "--decide", "skill/agents/none=keep", "--json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 2 {
+			t.Fatalf("%v code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	run([]string{"apply", "--decide", "skill/agents/none=keep", "--json"}, &stdout, &stderr)
+	if !strings.Contains(stdout.String(), `"code":"usage"`) || !strings.Contains(stdout.String(), "skill/agents/none") {
+		t.Fatalf("usage error: %q", stdout.String())
+	}
+	if got, _ := os.ReadFile(destination); !bytes.Equal(got, original) {
+		t.Fatal("rejected decision changed the destination")
+	}
+
+	stdout.Reset()
+	if code := run([]string{"plan"}, &stdout, &stderr); code != 3 {
+		t.Fatalf("plan code=%d", code)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	digest, ok := strings.CutPrefix(lines[len(lines)-1], "digest=")
+	if !ok || len(digest) != 64 {
+		t.Fatalf("plan output must end with the digest: %q", stdout.String())
+	}
+	stdout.Reset()
+	if code := run([]string{"apply", "--expect", "0000", "--decide", id + "=replace", "--json"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("stale digest code=%d stdout=%q", code, stdout.String())
+	}
+	assertJSONError(t, stdout.Bytes(), terran.CodePlanChanged, "apply failed", "run terran plan --json again and review")
+	if got, _ := os.ReadFile(destination); !bytes.Equal(got, original) {
+		t.Fatal("stale digest changed the destination")
+	}
+	stdout.Reset()
+	if code := run([]string{"apply", "--expect", digest, "--decide", id + "=replace", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("decided apply code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got, _ := os.ReadFile(destination); !bytes.Contains(got, []byte("naru")) {
+		t.Fatalf("catalog config not installed: %q", got)
+	}
+}
