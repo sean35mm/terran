@@ -281,12 +281,123 @@ func validatePlatforms(platforms []string) error {
 	return nil
 }
 
-func revalidateLoadedManifest(expected LoadedManifest) error {
-	current, err := LoadManifest(expected.Repository)
+// Catalogs is the enrolled primary catalog plus an optional private overlay
+// that may only add items.
+type Catalogs struct {
+	Primary     LoadedManifest
+	Overlay     *LoadedManifest // nil when the enrollment has no overlay
+	Fingerprint string          // sha256 over Primary.Fingerprint + "\n" + Overlay.Fingerprint (or "" when nil)
+}
+
+func LoadCatalogs(e Enrollment) (Catalogs, error) {
+	primary, err := LoadManifest(e.RepositoryPath)
+	if err != nil {
+		return Catalogs{}, err
+	}
+	if primary.Manifest.ID != e.RepositoryID {
+		return Catalogs{}, Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("enrolled repository id changed"))
+	}
+	if e.OverlayPath == "" {
+		return combineCatalogs(primary, nil)
+	}
+	unavailable := func(err error) error {
+		return Coded(CodeOverlayUnavailable, "clone the private catalog to "+e.OverlayPath+" or re-enroll", fmt.Errorf("overlay catalog unavailable: %w", err))
+	}
+	overlay, err := LoadManifest(e.OverlayPath)
+	if err != nil {
+		return Catalogs{}, unavailable(err)
+	}
+	if overlay.Manifest.ID != e.OverlayID || overlay.Repository != e.OverlayPath {
+		return Catalogs{}, unavailable(fmt.Errorf("enrolled overlay id or path changed"))
+	}
+	return combineCatalogs(primary, &overlay)
+}
+
+func combineCatalogs(primary LoadedManifest, overlay *LoadedManifest) (Catalogs, error) {
+	catalogs := Catalogs{Primary: primary, Overlay: overlay}
+	overlayFingerprint := ""
+	if overlay != nil {
+		p, o := primary.Manifest, overlay.Manifest
+		duplicate := func(what string) error {
+			return Coded(CodeManifestInvalid, nextManifest, fmt.Errorf("%s is declared by both catalogs %s and %s", what, p.ID, o.ID))
+		}
+		if o.ID == p.ID {
+			return Catalogs{}, Coded(CodeManifestInvalid, nextManifest, fmt.Errorf("overlay catalog id %q must differ from the primary catalog id", o.ID))
+		}
+		for skill := range overlay.Sources {
+			if _, ok := primary.Sources[skill]; ok {
+				return Catalogs{}, duplicate("skill " + skill)
+			}
+		}
+		for target := range overlay.InstructionSources {
+			if _, ok := primary.InstructionSources[target]; ok {
+				return Catalogs{}, duplicate("instruction target " + target)
+			}
+		}
+		for target := range overlay.ConfigSources {
+			if _, ok := primary.ConfigSources[target]; ok {
+				return Catalogs{}, duplicate("config target " + target)
+			}
+		}
+		for _, item := range o.JSONKeys {
+			for _, prior := range p.JSONKeys {
+				if item.Target == prior.Target {
+					return Catalogs{}, duplicate("json-keys target " + item.Target)
+				}
+			}
+		}
+		for _, item := range o.Files {
+			for _, prior := range p.Files {
+				if item.Target == prior.Target && item.Name == prior.Name {
+					return Catalogs{}, duplicate("file " + item.Target + "/" + item.Name)
+				}
+			}
+		}
+		overlayFingerprint = overlay.Fingerprint
+	}
+	sum := sha256.Sum256([]byte(primary.Fingerprint + "\n" + overlayFingerprint))
+	catalogs.Fingerprint = hex.EncodeToString(sum[:])
+	return catalogs, nil
+}
+
+// list returns the primary catalog followed by the overlay, if any.
+func (c Catalogs) list() []LoadedManifest {
+	if c.Overlay == nil {
+		return []LoadedManifest{c.Primary}
+	}
+	return []LoadedManifest{c.Primary, *c.Overlay}
+}
+
+// catalog returns the loaded catalog an item or receipt entry belongs to.
+func (c Catalogs) catalog(id string) (LoadedManifest, error) {
+	for _, loaded := range c.list() {
+		if loaded.Manifest.ID == id {
+			return loaded, nil
+		}
+	}
+	return LoadedManifest{}, fmt.Errorf("unknown catalog %q", id)
+}
+
+// insideAny reports whether path lies inside any catalog repository.
+func (c Catalogs) insideAny(path string) bool {
+	for _, loaded := range c.list() {
+		if contained(loaded.Repository, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func revalidateCatalogs(expected Catalogs) error {
+	enrollment := Enrollment{RepositoryID: expected.Primary.Manifest.ID, RepositoryPath: expected.Primary.Repository}
+	if expected.Overlay != nil {
+		enrollment.OverlayID, enrollment.OverlayPath = expected.Overlay.Manifest.ID, expected.Overlay.Repository
+	}
+	current, err := LoadCatalogs(enrollment)
 	if err != nil {
 		return err
 	}
-	if current.Manifest.ID != expected.Manifest.ID || current.Manifest.Version != expected.Manifest.Version || current.Fingerprint != expected.Fingerprint {
+	if current.Fingerprint != expected.Fingerprint {
 		return fmt.Errorf("catalog manifest changed during apply")
 	}
 	return nil

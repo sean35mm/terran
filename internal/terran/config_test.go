@@ -153,7 +153,7 @@ func TestConfigManifestFingerprintValidationAndDestinations(t *testing.T) {
 		t.Fatalf("stable config changed fingerprint: %v", err)
 	}
 	prepareInstructionParents(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	plan, err := Plan("opencode")
@@ -171,7 +171,7 @@ func TestConfigManifestFingerprintValidationAndDestinations(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
 	writeCatalogWithConfigs(t, repo, nil, []Config{{Target: "opencode-config", Source: "config/opencode.json"}})
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	plan, err = Plan("opencode")
@@ -250,7 +250,7 @@ func TestConfigManifestRejectsInvalidEntriesAndCanonicalSourceIsSafe(t *testing.
 func TestOpenCodeFilterSelectsInstructionAndConfig(t *testing.T) {
 	_, repo := configEnvironment(t, true)
 	prepareInstructionParents(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	plan, err := Plan("opencode")
@@ -271,7 +271,7 @@ func TestNaruRuntimeConfigProjectsWithOpenCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	prepareInstructionParents(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	plan, err := Plan("opencode")
@@ -283,7 +283,7 @@ func TestNaruRuntimeConfigProjectsWithOpenCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths, _ := ResolvePaths()
-	receipt, err := LoadReceipt(paths)
+	receipt, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || len(receipt.Managed) != 2 || receipt.Managed[0].Kind != "config" || receipt.Managed[1].Kind != "config" {
 		t.Fatalf("both configs should be owned: %#v %v", receipt, err)
 	}
@@ -300,14 +300,14 @@ func TestNaruRuntimeConfigProjectsWithOpenCode(t *testing.T) {
 
 func TestFilteredSkillApplyPreservesConfigReceipt(t *testing.T) {
 	_, repo := configEnvironment(t, false)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Apply("opencode", "config-build"); err != nil {
 		t.Fatal(err)
 	}
 	paths, _ := ResolvePaths()
-	before, err := LoadReceipt(paths)
+	before, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || len(before.Managed) != 1 || before.Managed[0].Kind != "config" {
 		t.Fatalf("initial config receipt: %#v %v", before, err)
 	}
@@ -335,7 +335,7 @@ func TestFilteredSkillApplyPreservesConfigReceipt(t *testing.T) {
 	if _, err := Apply("agents", "skill-build"); err != nil {
 		t.Fatal(err)
 	}
-	after, err := LoadReceipt(paths)
+	after, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || len(after.Managed) != 1 || after.Managed[0] != before.Managed[0] {
 		t.Fatalf("filtered apply changed config ownership metadata: before=%#v after=%#v err=%v", before.Managed, after.Managed, err)
 	}
@@ -345,7 +345,7 @@ func TestConfigCreateUpdateNoopDriftRemoveStatusDoctorAndReceipt(t *testing.T) {
 	_, repo := configEnvironment(t, false)
 	paths, _ := ResolvePaths()
 	destination, _ := configDestination(paths, "opencode-config")
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	if plan, err := Plan("opencode"); err != nil || actionCount(plan, "create") != 1 {
@@ -357,7 +357,7 @@ func TestConfigCreateUpdateNoopDriftRemoveStatusDoctorAndReceipt(t *testing.T) {
 	if fileMode(t, destination) != 0o600 {
 		t.Fatalf("created config mode is %o", fileMode(t, destination))
 	}
-	receipt, err := LoadReceipt(paths)
+	receipt, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "config" || receipt.Managed[0].Target != "opencode-config" {
 		t.Fatalf("config receipt is not distinct: %#v %v", receipt, err)
 	}
@@ -424,14 +424,14 @@ func TestConfigAdoptRestoreCollisionAndReceiptValidation(t *testing.T) {
 		if err := os.WriteFile(destination, original, 0o640); err != nil {
 			t.Fatal(err)
 		}
-		_, _, _ = Enroll(repo, "test", false)
+		_, _, _ = Enroll(repo, "test", "", false)
 		if plan, err := Plan("opencode"); err != nil || actionCount(plan, "adopt") != 1 {
 			t.Fatalf("adopt plan: %#v %v", plan, err)
 		}
 		if _, err := Apply("opencode", "test"); err != nil {
 			t.Fatal(err)
 		}
-		receipt, _ := LoadReceipt(paths)
+		receipt, _ := LoadReceipt(paths, Enrollment{})
 		if len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "config" || receipt.Managed[0].Origin != "adopted" || receipt.Managed[0].OriginalMode != 0o640 || fileMode(t, receipt.Managed[0].Backup) != 0o600 {
 			t.Fatalf("adopted config receipt/backup invalid: %#v", receipt)
 		}
@@ -461,7 +461,7 @@ func TestConfigAdoptRestoreCollisionAndReceiptValidation(t *testing.T) {
 		if err := os.WriteFile(destination, []byte(`{"different":true}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, _, _ = Enroll(repo, "test", false)
+		_, _, _ = Enroll(repo, "test", "", false)
 		if plan, err := Plan("opencode"); err != nil || actionCount(plan, "blocked_collision") != 1 {
 			t.Fatalf("config collision not blocked: %#v %v", plan, err)
 		}
@@ -469,15 +469,15 @@ func TestConfigAdoptRestoreCollisionAndReceiptValidation(t *testing.T) {
 
 	t.Run("receipt destination", func(t *testing.T) {
 		_, repo := configEnvironment(t, false)
-		_, _, _ = Enroll(repo, "test", false)
+		_, _, _ = Enroll(repo, "test", "", false)
 		_, _ = Apply("opencode", "test")
 		paths, _ := ResolvePaths()
-		receipt, _ := LoadReceipt(paths)
+		receipt, _ := LoadReceipt(paths, Enrollment{})
 		receipt.Managed[0].Destination = filepath.Join(paths.Home, "outside")
 		if err := atomicJSON(paths.Receipt, receipt); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadReceipt(paths); err == nil {
+		if _, err := LoadReceipt(paths, Enrollment{}); err == nil {
 			t.Fatal("unsafe config receipt destination accepted")
 		}
 	})
@@ -486,7 +486,7 @@ func TestConfigAdoptRestoreCollisionAndReceiptValidation(t *testing.T) {
 func TestConfigRollbackAndEnrollmentReplacement(t *testing.T) {
 	_, repo := configEnvironment(t, true)
 	prepareInstructionParents(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	count := 0
 	beforeInstructionMutation = func(Action) error {
 		count++
@@ -515,7 +515,7 @@ func TestConfigRollbackAndEnrollmentReplacement(t *testing.T) {
 	}
 	other := filepath.Join(t.TempDir(), "other")
 	writeCatalogWithConfigs(t, other, nil, nil)
-	if _, _, err := Enroll(other, "other", true); err == nil || !strings.Contains(err.Error(), "decommission") {
+	if _, _, err := Enroll(other, "other", "", true); err == nil || !strings.Contains(err.Error(), "decommission") {
 		t.Fatalf("managed config enrollment replacement accepted: %v", err)
 	}
 }

@@ -107,6 +107,7 @@ type Action struct {
 	ID          string `json:"id"`
 	Kind        string `json:"kind"`
 	Action      string `json:"action"`
+	Catalog     string `json:"catalog"`
 	Skill       string `json:"skill,omitempty"`
 	Target      string `json:"target"`
 	Source      string `json:"source"`

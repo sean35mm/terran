@@ -166,7 +166,7 @@ func TestInstructionSourceSafety(t *testing.T) {
 func TestInstructionDestinationsUseXDGAndDefault(t *testing.T) {
 	home, repo := instructionEnvironment(t, "opencode-global")
 	prepareInstructionParents(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	plan, err := Plan("opencode")
@@ -185,7 +185,7 @@ func TestInstructionDestinationsUseXDGAndDefault(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
 	writeCatalogWithInstructions(t, repo, nil, []Instruction{{Target: "opencode-global", Source: "instructions/opencode.md"}})
 	prepareInstructionParents(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	plan, err = Plan("opencode")
@@ -206,7 +206,7 @@ func TestInstructionAdoptionPreservesFileAndCreatesBackup(t *testing.T) {
 	}
 	before, _ := os.Stat(destination)
 	beforeStat := before.Sys().(*syscall.Stat_t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	plan, err := Plan("claude")
@@ -226,7 +226,7 @@ func TestInstructionAdoptionPreservesFileAndCreatesBackup(t *testing.T) {
 	if err != nil || string(backupData) != string(data) || fileMode(t, backup) != 0o600 {
 		t.Fatalf("invalid backup: %v", err)
 	}
-	receipt, err := LoadReceipt(paths)
+	receipt, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "instruction" || receipt.Managed[0].Origin != "adopted" || receipt.Managed[0].OriginalMode != 0o640 {
 		t.Fatalf("invalid adoption receipt: %#v %v", receipt, err)
 	}
@@ -260,7 +260,7 @@ func TestInstructionCollisionsBlockAllSelectedActions(t *testing.T) {
 			blockedDestination, _ := instructionDestination(paths, "claude-global")
 			data, _ := os.ReadFile(filepath.Join(repo, "instructions", "claude-global.md"))
 			tc.mutate(t, blockedDestination, data)
-			if _, _, err := Enroll(repo, "test", false); err != nil {
+			if _, _, err := Enroll(repo, "test", "", false); err != nil {
 				t.Fatal(err)
 			}
 			plan, _ := Plan("all")
@@ -282,7 +282,7 @@ func TestInstructionCollisionsBlockAllSelectedActions(t *testing.T) {
 func TestInstructionCreateUpdateNoopDriftAndFiltering(t *testing.T) {
 	home, repo := instructionEnvironment(t, "claude-global", "opencode-global")
 	prepareInstructionParents(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	plan, _ := Plan("opencode")
@@ -293,7 +293,7 @@ func TestInstructionCreateUpdateNoopDriftAndFiltering(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths, _ := ResolvePaths()
-	receipt, _ := LoadReceipt(paths)
+	receipt, _ := LoadReceipt(paths, Enrollment{})
 	if len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "instruction" || receipt.Managed[0].Target != "opencode-global" {
 		t.Fatalf("filtered receipt: %#v", receipt)
 	}
@@ -338,7 +338,7 @@ func TestInstructionCreateUpdateNoopDriftAndFiltering(t *testing.T) {
 func TestAddingInstructionsLeavesExistingSkillsNoop(t *testing.T) {
 	home, repo := testEnvironment(t)
 	prepareInstructionParents(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Apply("all", "test"); err != nil {
@@ -357,7 +357,7 @@ func TestInstructionRemovalCreatedAndAdopted(t *testing.T) {
 	t.Run("created", func(t *testing.T) {
 		_, repo := instructionEnvironment(t, "claude-global")
 		prepareInstructionParents(t)
-		_, _, _ = Enroll(repo, "test", false)
+		_, _, _ = Enroll(repo, "test", "", false)
 		_, _ = Apply("claude", "test")
 		writeCatalogWithInstructions(t, repo, nil, nil)
 		plan, _ := Plan("claude")
@@ -381,7 +381,7 @@ func TestInstructionRemovalCreatedAndAdopted(t *testing.T) {
 		destination, _ := instructionDestination(paths, "claude-global")
 		original := []byte("# claude-global\n")
 		_ = os.WriteFile(destination, original, 0o640)
-		_, _, _ = Enroll(repo, "test", false)
+		_, _, _ = Enroll(repo, "test", "", false)
 		_, _ = Apply("claude", "test")
 		source := filepath.Join(repo, "instructions", "claude-global.md")
 		_ = os.WriteFile(source, []byte("# managed change\n"), 0o644)
@@ -422,7 +422,7 @@ func TestAdoptedRestoreCleanupFailureDoesNotBlockReintroduction(t *testing.T) {
 	destination, _ := instructionDestination(paths, "claude-global")
 	source, _ := os.ReadFile(filepath.Join(repo, "instructions", "claude-global.md"))
 	_ = os.WriteFile(destination, source, 0o644)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	_, _ = Apply("claude", "test")
 	writeCatalogWithInstructions(t, repo, nil, nil)
 	removeInstructionBackup = func(string) error { return errors.New("forced cleanup failure") }
@@ -454,7 +454,7 @@ func TestInstructionRemovalBlocksOnDriftOrBadBackup(t *testing.T) {
 			destination, _ := instructionDestination(paths, "claude-global")
 			source, _ := os.ReadFile(filepath.Join(repo, "instructions", "claude-global.md"))
 			_ = os.WriteFile(destination, source, 0o644)
-			_, _, _ = Enroll(repo, "test", false)
+			_, _, _ = Enroll(repo, "test", "", false)
 			_, _ = Apply("claude", "test")
 			backup := instructionBackup(paths, "claude-global")
 			switch mutation {
@@ -479,15 +479,15 @@ func TestInstructionRemovalBlocksOnDriftOrBadBackup(t *testing.T) {
 func TestInstructionReceiptSafetyAndLegacyCompatibility(t *testing.T) {
 	_, repo := instructionEnvironment(t, "claude-global")
 	prepareInstructionParents(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	_, _ = Apply("claude", "test")
 	paths, _ := ResolvePaths()
-	receipt, _ := LoadReceipt(paths)
+	receipt, _ := LoadReceipt(paths, Enrollment{})
 	receipt.Managed[0].Destination = filepath.Join(paths.Home, "outside")
 	if err := atomicJSON(paths.Receipt, receipt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadReceipt(paths); err == nil {
+	if _, err := LoadReceipt(paths, Enrollment{}); err == nil {
 		t.Fatal("malicious destination accepted")
 	}
 	receipt.Managed[0].Destination, _ = instructionDestination(paths, "claude-global")
@@ -495,7 +495,7 @@ func TestInstructionReceiptSafetyAndLegacyCompatibility(t *testing.T) {
 	if err := atomicJSON(paths.Receipt, receipt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadReceipt(paths); err == nil {
+	if _, err := LoadReceipt(paths, Enrollment{}); err == nil {
 		t.Fatal("malicious source accepted")
 	}
 	receipt.Managed[0].Source = filepath.Join(repo, "instructions", "claude-global.md")
@@ -503,7 +503,7 @@ func TestInstructionReceiptSafetyAndLegacyCompatibility(t *testing.T) {
 	if err := atomicJSON(paths.Receipt, receipt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadReceipt(paths); err == nil {
+	if _, err := LoadReceipt(paths, Enrollment{}); err == nil {
 		t.Fatal("malicious backup accepted")
 	}
 
@@ -511,7 +511,7 @@ func TestInstructionReceiptSafetyAndLegacyCompatibility(t *testing.T) {
 	if err := os.WriteFile(paths.Receipt, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := LoadReceipt(paths)
+	loaded, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || loaded.Managed != nil {
 		t.Fatalf("legacy receipt failed: %#v %v", loaded, err)
 	}
@@ -526,7 +526,7 @@ func TestV03StateUpgradeDoesNotRewriteManagedDestinations(t *testing.T) {
 	}
 	writeCatalogWithInstructions(t, repo, projections, instructions)
 	prepareInstructionParents(t)
-	if _, _, err := Enroll(repo, "v0.3", false); err != nil {
+	if _, _, err := Enroll(repo, "v0.3", "", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Apply("all", "0.3.0"); err != nil {
@@ -538,7 +538,7 @@ func TestV03StateUpgradeDoesNotRewriteManagedDestinations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := LoadReceipt(paths)
+	receipt, err := LoadReceipt(paths, Enrollment{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +635,7 @@ func TestV03StateUpgradeDoesNotRewriteManagedDestinations(t *testing.T) {
 	if bytes.Equal(afterReceipt, receiptBytes) {
 		t.Fatal("apply did not upgrade receipt.json")
 	}
-	upgraded, err := LoadReceipt(paths)
+	upgraded, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || upgraded.SchemaVersion != SchemaVersion || len(upgraded.Projections) != 2 || len(upgraded.Managed) != 2 {
 		t.Fatalf("upgraded receipt invalid: %#v %v", upgraded, err)
 	}
@@ -698,7 +698,7 @@ func mustJSON(t *testing.T, value string) []byte {
 func TestInstructionTransactionRollback(t *testing.T) {
 	_, repo := instructionEnvironment(t, "claude-global", "opencode-global")
 	prepareInstructionParents(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	count := 0
 	beforeInstructionMutation = func(Action) error {
 		count++
@@ -745,7 +745,7 @@ func TestSkillMutationsRollbackOnInstructionAndReceiptFailures(t *testing.T) {
 				} else {
 					writeCatalogWithInstructions(t, repo, []Projection{projection}, []Instruction{instruction})
 				}
-				_, _, _ = Enroll(repo, "test", false)
+				_, _, _ = Enroll(repo, "test", "", false)
 				paths, _ := ResolvePaths()
 				destination := filepath.Join(home, ".agents", "skills", "example")
 				if action != "create" {
@@ -797,7 +797,7 @@ func TestInstructionPostRenameFailuresRollback(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			_, repo := instructionEnvironment(t, "claude-global")
 			prepareInstructionParents(t)
-			_, _, _ = Enroll(repo, "test", false)
+			_, _, _ = Enroll(repo, "test", "", false)
 			paths, _ := ResolvePaths()
 			destination, _ := instructionDestination(paths, "claude-global")
 			if stage == "parent sync" {
@@ -826,7 +826,7 @@ func TestInstructionRestorePostRenameFailureRollsBack(t *testing.T) {
 	destination, _ := instructionDestination(paths, "claude-global")
 	source, _ := os.ReadFile(filepath.Join(repo, "instructions", "claude-global.md"))
 	_ = os.WriteFile(destination, source, 0o640)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	_, _ = Apply("claude", "test")
 	_ = os.WriteFile(filepath.Join(repo, "instructions", "claude-global.md"), []byte("# managed\n"), 0o644)
 	_, _ = Apply("claude", "test")
@@ -849,11 +849,11 @@ func TestInstructionRestorePostRenameFailureRollsBack(t *testing.T) {
 func TestEnrollReplaceRefusesManagedInstruction(t *testing.T) {
 	_, repo := instructionEnvironment(t, "claude-global")
 	prepareInstructionParents(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	_, _ = Apply("claude", "test")
 	other := filepath.Join(t.TempDir(), "other")
 	writeCatalogWithInstructions(t, other, nil, nil)
-	if _, _, err := Enroll(other, "other", true); err == nil || !strings.Contains(err.Error(), "decommission") {
+	if _, _, err := Enroll(other, "other", "", true); err == nil || !strings.Contains(err.Error(), "decommission") {
 		t.Fatalf("managed instruction replacement accepted: %v", err)
 	}
 }
@@ -864,7 +864,7 @@ func TestInstructionSourceRaceRollsBackAllSelectedMutations(t *testing.T) {
 	instruction := Instruction{Target: "claude-global", Source: "instructions/claude-global.md"}
 	writeCatalogWithInstructions(t, repo, []Projection{projection}, []Instruction{instruction})
 	prepareInstructionParents(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	beforeInstructionMutation = func(Action) error {
@@ -886,7 +886,7 @@ func TestInstructionSourceRaceRollsBackAllSelectedMutations(t *testing.T) {
 func TestPostRenameReceiptSyncFailureCommitsVerifiedReceipt(t *testing.T) {
 	_, repo := instructionEnvironment(t, "claude-global")
 	prepareInstructionParents(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	afterReceiptRename = func() error { return errors.New("forced receipt directory sync failure") }
 	t.Cleanup(func() { afterReceiptRename = nil })
 	result, err := Apply("claude", "test")
@@ -897,7 +897,7 @@ func TestPostRenameReceiptSyncFailureCommitsVerifiedReceipt(t *testing.T) {
 		t.Fatalf("durability limitation was not reported: %#v", result)
 	}
 	paths, _ := ResolvePaths()
-	if _, err := LoadReceipt(paths); err != nil {
+	if _, err := LoadReceipt(paths, Enrollment{}); err != nil {
 		t.Fatalf("committed receipt is invalid: %v", err)
 	}
 	plan, err := Plan("claude")
@@ -909,7 +909,7 @@ func TestPostRenameReceiptSyncFailureCommitsVerifiedReceipt(t *testing.T) {
 func TestReceiptRestorationFailureIsReportedAndKeepsOwnershipBytes(t *testing.T) {
 	_, repo := instructionEnvironment(t, "claude-global")
 	prepareInstructionParents(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	paths, _ := ResolvePaths()
 	afterReceiptRename = func() error {
 		if err := os.Chmod(paths.Receipt, 0o666); err != nil {
@@ -943,7 +943,7 @@ func TestHoldPersistsAndIsIdempotent(t *testing.T) {
 	if _, err := Hold("instruction/claude-global"); err == nil {
 		t.Fatal("hold succeeded before enrollment")
 	}
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	for _, id := range []string{"instruction/nope", "skill/agents/missing"} {
 		if _, err := Hold(id); err == nil {
 			t.Fatalf("unknown id %q held", id)
@@ -975,7 +975,7 @@ func TestHeldDriftedInstructionDoesNotBlockAndSkillHoldIsNotProjected(t *testing
 	home, repo := instructionEnvironment(t, "claude-global")
 	writeCatalogWithInstructions(t, repo, []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}}}, []Instruction{{Target: "claude-global", Source: "instructions/claude-global.md"}})
 	prepareInstructionParents(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	if _, err := Hold("skill/agents/example"); err != nil {
 		t.Fatal(err)
 	}
@@ -986,7 +986,7 @@ func TestHeldDriftedInstructionDoesNotBlockAndSkillHoldIsNotProjected(t *testing
 		t.Fatal("held skill was projected")
 	}
 	paths, _ := ResolvePaths()
-	receipt, err := LoadReceipt(paths)
+	receipt, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || len(receipt.Projections) != 1 || receipt.Projections[0].Target != "claude" {
 		t.Fatalf("receipt: %#v %v", receipt, err)
 	}
@@ -1026,7 +1026,7 @@ func TestHeldOwnedInstructionRemovedFromCatalogStaysUntouched(t *testing.T) {
 	destination, _ := instructionDestination(paths, "claude-global")
 	original := []byte("# claude-global\n")
 	_ = os.WriteFile(destination, original, 0o640)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	if _, err := Apply("claude", "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -1041,7 +1041,7 @@ func TestHeldOwnedInstructionRemovedFromCatalogStaysUntouched(t *testing.T) {
 	backup := instructionBackup(paths, "claude-global")
 	before := snapshotManagedDestination(t, destination)
 	backupBefore := snapshotManagedDestination(t, backup)
-	receiptBefore, err := LoadReceipt(paths)
+	receiptBefore, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || len(receiptBefore.Managed) != 1 || receiptBefore.Managed[0].Origin != "adopted" {
 		t.Fatalf("receipt: %#v %v", receiptBefore, err)
 	}
@@ -1054,7 +1054,7 @@ func TestHeldOwnedInstructionRemovedFromCatalogStaysUntouched(t *testing.T) {
 	}
 	assertManagedDestinationUnchanged(t, destination, before, snapshotManagedDestination(t, destination))
 	assertManagedDestinationUnchanged(t, backup, backupBefore, snapshotManagedDestination(t, backup))
-	receiptAfter, err := LoadReceipt(paths)
+	receiptAfter, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || !reflect.DeepEqual(receiptBefore.Managed, receiptAfter.Managed) {
 		t.Fatalf("receipt entry changed: %#v %v", receiptAfter.Managed, err)
 	}

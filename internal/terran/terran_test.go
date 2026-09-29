@@ -151,7 +151,7 @@ func TestErrorCodeClassification(t *testing.T) {
 			name: "tampered receipt",
 			run: func(t *testing.T) error {
 				_, repo := testEnvironment(t)
-				if _, _, err := Enroll(repo, "test", false); err != nil {
+				if _, _, err := Enroll(repo, "test", "", false); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := Apply("all", "test"); err != nil {
@@ -310,7 +310,7 @@ func TestManifestRejectsMultiplyLinkedControlFiles(t *testing.T) {
 
 func TestApplyRejectsChangedEnrolledIDWithoutProjectionMutation(t *testing.T) {
 	home, repo := testEnvironment(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	manifestPath := filepath.Join(repo, "terran.json")
@@ -372,7 +372,7 @@ func TestRejectsUnsafeRepositorySourceAndTargetPermissions(t *testing.T) {
 	if err := os.Chmod(filepath.Join(repo, "skills", "example"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(home, ".agents", "skills")
@@ -454,20 +454,20 @@ func TestPathSafetyAndEnrollment(t *testing.T) {
 		t.Fatal("relative XDG path accepted")
 	}
 	t.Setenv("XDG_STATE_HOME", filepath.Join(os.Getenv("HOME"), "state"))
-	first, changed, err := Enroll(repo, "test center", false)
+	first, changed, err := Enroll(repo, "test center", "", false)
 	if err != nil || !changed {
 		t.Fatalf("enroll: %v", err)
 	}
-	second, changed, err := Enroll(repo, "ignored new name", false)
+	second, changed, err := Enroll(repo, "test center", "", false)
 	if err != nil || changed || !reflect.DeepEqual(first, second) {
 		t.Fatalf("idempotent enroll failed: %v", err)
 	}
 	other := filepath.Join(t.TempDir(), "other")
 	writeCatalog(t, other, []Projection{{Skill: "other", Source: "skills/other", Targets: []string{"agents"}}})
-	if _, _, err := Enroll(other, "other", false); err == nil {
+	if _, _, err := Enroll(other, "other", "", false); err == nil {
 		t.Fatal("different repository did not require replace")
 	}
-	replaced, changed, err := Enroll(other, "other", true)
+	replaced, changed, err := Enroll(other, "other", "", true)
 	if err != nil || !changed || replaced.CommandCenterID != first.CommandCenterID {
 		t.Fatalf("replace failed: %v", err)
 	}
@@ -482,25 +482,25 @@ func TestPathSafetyAndEnrollment(t *testing.T) {
 
 func TestEnrollReplaceRefusesManagedReceiptButIdenticalIsIdempotent(t *testing.T) {
 	_, repo := testEnvironment(t)
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Apply("agents", "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, changed, err := Enroll(repo, "ignored", true); err != nil || changed {
+	if _, changed, err := Enroll(repo, "test", "", true); err != nil || changed {
 		t.Fatalf("identical enrollment was not idempotent: changed=%v err=%v", changed, err)
 	}
 	other := filepath.Join(t.TempDir(), "other")
 	writeCatalog(t, other, []Projection{{Skill: "other", Source: "skills/other", Targets: []string{"agents"}}})
-	if _, _, err := Enroll(other, "other", true); err == nil || !strings.Contains(err.Error(), "decommission") || !strings.Contains(err.Error(), "migrate") {
+	if _, _, err := Enroll(other, "other", "", true); err == nil || !strings.Contains(err.Error(), "decommission") || !strings.Contains(err.Error(), "migrate") {
 		t.Fatalf("managed replacement was not clearly refused: %v", err)
 	}
 }
 
 func TestEnrollReplaceRetiresTrustedEmptyReceipt(t *testing.T) {
 	_, repo := testEnvironment(t)
-	first, _, err := Enroll(repo, "test", false)
+	first, _, err := Enroll(repo, "test", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func TestEnrollReplaceRetiresTrustedEmptyReceipt(t *testing.T) {
 	other := filepath.Join(t.TempDir(), "other")
 	writeCatalog(t, other, []Projection{{Skill: "other", Source: "skills/other", Targets: []string{"agents"}}})
 	canonicalOther, _ := filepath.EvalSymlinks(other)
-	replaced, changed, err := Enroll(other, "other", true)
+	replaced, changed, err := Enroll(other, "other", "", true)
 	if err != nil || !changed || replaced.RepositoryPath != canonicalOther {
 		t.Fatalf("empty-receipt replacement failed: %#v changed=%v err=%v", replaced, changed, err)
 	}
@@ -522,14 +522,14 @@ func TestEnrollReplaceRetiresTrustedEmptyReceipt(t *testing.T) {
 	if _, err := Plan("all"); err != nil {
 		t.Fatalf("replacement was not immediately usable: %v", err)
 	}
-	if _, changed, err := Enroll(other, "ignored", true); err != nil || changed {
+	if _, changed, err := Enroll(other, "other", "", true); err != nil || changed {
 		t.Fatalf("replacement was not idempotent: changed=%v err=%v", changed, err)
 	}
 }
 
 func TestEnrollReplaceConfigFailureRestoresPriorEmptyEnrollment(t *testing.T) {
 	_, repo := testEnvironment(t)
-	first, _, _ := Enroll(repo, "test", false)
+	first, _, _ := Enroll(repo, "test", "", false)
 	paths, _ := ResolvePaths()
 	empty := Receipt{SchemaVersion: SchemaVersion, RepositoryID: first.RepositoryID, RepositoryPath: first.RepositoryPath, RepositoryVersion: "0.1.0", Projections: []ReceiptProjection{}}
 	if err := atomicJSON(paths.Receipt, empty); err != nil {
@@ -541,7 +541,7 @@ func TestEnrollReplaceConfigFailureRestoresPriorEmptyEnrollment(t *testing.T) {
 	writeCatalog(t, other, nil)
 	beforeEnrollmentConfigWrite = func() error { return errors.New("forced config write failure") }
 	t.Cleanup(func() { beforeEnrollmentConfigWrite = nil })
-	if _, _, err := Enroll(other, "other", true); err == nil || !strings.Contains(err.Error(), "forced config write failure") {
+	if _, _, err := Enroll(other, "other", "", true); err == nil || !strings.Contains(err.Error(), "forced config write failure") {
 		t.Fatalf("forced config failure missing: %v", err)
 	}
 	configAfter, configErr := os.ReadFile(paths.ConfigFile)
@@ -560,7 +560,7 @@ func TestTrustedStateFilesRejectSymlinkHardlinkAndUnsafeMode(t *testing.T) {
 		for _, mutation := range []string{"symlink", "hardlink", "unsafe mode"} {
 			t.Run(state+"/"+mutation, func(t *testing.T) {
 				_, repo := testEnvironment(t)
-				_, _, _ = Enroll(repo, "test", false)
+				_, _, _ = Enroll(repo, "test", "", false)
 				if _, err := Apply("agents", "test"); err != nil {
 					t.Fatal(err)
 				}
@@ -594,7 +594,7 @@ func TestTrustedStateFilesRejectSymlinkHardlinkAndUnsafeMode(t *testing.T) {
 				if state == "config" {
 					_, err = LoadEnrollment(paths)
 				} else {
-					_, err = LoadReceipt(paths)
+					_, err = LoadReceipt(paths, Enrollment{})
 				}
 				if err == nil {
 					t.Fatal("unsafe trusted state file was parsed")
@@ -614,7 +614,7 @@ func TestTrustedStateFilesRejectForeignOwnerWhenPortable(t *testing.T) {
 	for _, state := range []string{"config", "receipt"} {
 		t.Run(state, func(t *testing.T) {
 			_, repo := testEnvironment(t)
-			_, _, _ = Enroll(repo, "test", false)
+			_, _, _ = Enroll(repo, "test", "", false)
 			_, _ = Apply("agents", "test")
 			paths, _ := ResolvePaths()
 			path := paths.ConfigFile
@@ -633,7 +633,7 @@ func TestTrustedStateFilesRejectForeignOwnerWhenPortable(t *testing.T) {
 
 func TestCreateAdoptNoopCollisionDriftAndRemoval(t *testing.T) {
 	home, repo := testEnvironment(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	plan, err := Plan("all")
 	if err != nil || actionCount(plan, "create") != 2 {
 		t.Fatalf("create plan: %#v %v", plan, err)
@@ -685,7 +685,7 @@ func TestCreateAdoptNoopCollisionDriftAndRemoval(t *testing.T) {
 
 func TestCollisionWithoutReceiptAndTargetFiltering(t *testing.T) {
 	home, repo := testEnvironment(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	root := filepath.Join(home, ".agents", "skills")
 	_ = os.MkdirAll(root, 0o755)
 	_ = os.WriteFile(filepath.Join(root, "example"), []byte("owned elsewhere"), 0o600)
@@ -704,7 +704,7 @@ func TestCollisionWithoutReceiptAndTargetFiltering(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths, _ := ResolvePaths()
-	receipt, _ := LoadReceipt(paths)
+	receipt, _ := LoadReceipt(paths, Enrollment{})
 	if len(receipt.Projections) != 1 || receipt.Projections[0].Target != "claude" {
 		t.Fatalf("unexpected filtered receipt: %#v", receipt)
 	}
@@ -714,7 +714,7 @@ func TestCollisionWithoutReceiptAndTargetFiltering(t *testing.T) {
 	if _, err := Apply("agents", "test"); err != nil {
 		t.Fatal(err)
 	}
-	receipt, _ = LoadReceipt(paths)
+	receipt, _ = LoadReceipt(paths, Enrollment{})
 	if len(receipt.Projections) != 2 {
 		t.Fatalf("other target receipt not preserved: %#v", receipt)
 	}
@@ -722,7 +722,7 @@ func TestCollisionWithoutReceiptAndTargetFiltering(t *testing.T) {
 
 func TestMaliciousReceiptCannotAuthorizeRemoval(t *testing.T) {
 	home, repo := testEnvironment(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	paths, _ := ResolvePaths()
 	enrollment, _ := LoadEnrollment(paths)
 	outside := filepath.Join(home, "outside")
@@ -739,15 +739,15 @@ func TestMaliciousReceiptCannotAuthorizeRemoval(t *testing.T) {
 
 func TestSkillReceiptDestinationMustMatchFixedLeaf(t *testing.T) {
 	_, repo := testEnvironment(t)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	_, _ = Apply("agents", "test")
 	paths, _ := ResolvePaths()
-	receipt, _ := LoadReceipt(paths)
+	receipt, _ := LoadReceipt(paths, Enrollment{})
 	receipt.Projections[0].Destination = filepath.Join(paths.Home, "outside", "example")
 	if err := atomicJSON(paths.Receipt, receipt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadReceipt(paths); err == nil || !strings.Contains(err.Error(), "destination") {
+	if _, err := LoadReceipt(paths, Enrollment{}); err == nil || !strings.Contains(err.Error(), "destination") {
 		t.Fatalf("tampered skill destination accepted: %v", err)
 	}
 	doctor := Doctor("test")
@@ -972,7 +972,7 @@ func fileMode(t *testing.T, path string) os.FileMode {
 func TestPlatformFilterExcludesAndRemovesOwned(t *testing.T) {
 	home, repo := testEnvironment(t)
 	writeCatalog(t, repo, []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}, Platforms: []string{"darwin"}}})
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	previous := currentPlatform
 	t.Cleanup(func() { currentPlatform = previous })
 	link := filepath.Join(home, ".agents", "skills", "example")
@@ -1018,5 +1018,306 @@ func TestPlatformFilterExcludesAndRemovesOwned(t *testing.T) {
 	}
 	if plan, _ := Plan("all"); actionCount(plan, "excluded") != 2 {
 		t.Fatalf("plan after removal: %#v", plan)
+	}
+}
+
+// writeOverlay writes a catalog with id "private" (or keeps the primary id when
+// sameID is set) and returns its canonical path.
+func writeOverlay(t *testing.T, dir string, projections []Projection, instructions []Instruction, sameID bool) string {
+	t.Helper()
+	writeCatalogWithInstructions(t, dir, projections, instructions)
+	if !sameID {
+		path := filepath.Join(dir, "terran.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, bytes.Replace(data, []byte(`"id": "test-catalog"`), []byte(`"id": "private"`), 1), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
+func overlayEnrollment(t *testing.T, repo, overlay string) Enrollment {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Enrollment{RepositoryID: "test-catalog", RepositoryPath: canonical, OverlayID: "private", OverlayPath: overlay}
+}
+
+func TestOverlayMergeRejectsDuplicatesSameIDAndEscapes(t *testing.T) {
+	_, repo := testEnvironment(t)
+	base := filepath.Dir(repo)
+	secret := []Projection{{Skill: "secret", Source: "skills/secret", Targets: []string{"agents"}}}
+	claude := []Instruction{{Target: "claude-global", Source: "instructions/CLAUDE.md"}}
+	cases := map[string]func() string{
+		"duplicate skill": func() string {
+			return writeOverlay(t, filepath.Join(base, "dup-skill"), []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents"}}}, nil, false)
+		},
+		"duplicate instruction": func() string {
+			writeCatalogWithInstructions(t, repo, []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}}}, claude)
+			return writeOverlay(t, filepath.Join(base, "dup-instruction"), nil, claude, false)
+		},
+		"same id": func() string { return writeOverlay(t, filepath.Join(base, "same-id"), secret, nil, true) },
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			overlay := setup()
+			enrollment := overlayEnrollment(t, repo, overlay)
+			if name == "same id" {
+				enrollment.OverlayID = "test-catalog"
+			}
+			_, err := LoadCatalogs(enrollment)
+			if !hasCode(err, CodeManifestInvalid) || (name != "same id" && (!strings.Contains(err.Error(), "test-catalog") || !strings.Contains(err.Error(), "private"))) {
+				t.Fatalf("LoadCatalogs: %v", err)
+			}
+			if _, _, err := Enroll(repo, "test", overlay, false); !hasCode(err, CodeManifestInvalid) {
+				t.Fatalf("enroll accepted invalid overlay: %v", err)
+			}
+		})
+	}
+	t.Run("escaping source", func(t *testing.T) {
+		overlay := writeOverlay(t, filepath.Join(base, "escape"), secret, nil, false)
+		outside := filepath.Join(t.TempDir(), "outside")
+		writeCatalog(t, outside, []Projection{{Skill: "secret", Source: "secret", Targets: []string{"agents"}}})
+		if err := os.RemoveAll(filepath.Join(overlay, "skills", "secret")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(overlay, "skills", "secret")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Enroll(repo, "test", overlay, false); err == nil || !strings.Contains(err.Error(), "escapes") {
+			t.Fatalf("escaping overlay source accepted: %v", err)
+		}
+		if _, err := LoadCatalogs(overlayEnrollment(t, repo, overlay)); err == nil || !strings.Contains(err.Error(), "escapes") {
+			t.Fatalf("escaping overlay source loaded: %v", err)
+		}
+	})
+}
+
+func TestOverlayItemsCarryCatalogAndAreRemovedFromOverlay(t *testing.T) {
+	home, repo := testEnvironment(t)
+	overlayDir := filepath.Join(filepath.Dir(repo), "overlay")
+	overlay := writeOverlay(t, overlayDir, []Projection{{Skill: "secret", Source: "skills/secret", Targets: []string{"agents"}}}, []Instruction{{Target: "claude-global", Source: "instructions/CLAUDE.md"}}, false)
+	enrollment, changed, err := Enroll(repo, "test", overlay, false)
+	if err != nil || !changed || enrollment.OverlayID != "private" || enrollment.OverlayPath != overlay {
+		t.Fatalf("enroll overlay: %#v %v", enrollment, err)
+	}
+	plan, err := Plan("all")
+	if err != nil || actionCount(plan, "create") != 4 {
+		t.Fatalf("plan: %#v %v", plan, err)
+	}
+	for _, action := range plan.Actions {
+		want := "test-catalog"
+		if action.Skill == "secret" || action.Kind == "instruction" {
+			want = "private"
+		}
+		if action.Catalog != want {
+			t.Fatalf("action %s catalog %q, want %q", action.ID, action.Catalog, want)
+		}
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(home, ".agents", "skills", "secret")
+	if target, err := os.Readlink(link); err != nil || target != filepath.Join(overlay, "skills", "secret") {
+		t.Fatalf("overlay link: %q %v", target, err)
+	}
+	paths, _ := ResolvePaths()
+	receipt, err := LoadReceipt(paths, enrollment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogs := map[string]string{}
+	for _, projection := range receipt.Projections {
+		catalogs[projection.Skill+"/"+projection.Target] = projection.Catalog
+	}
+	for _, managed := range receipt.Managed {
+		catalogs[managed.Kind] = managed.Catalog
+	}
+	if catalogs["secret/agents"] != "private" || catalogs["instruction"] != "private" || catalogs["example/agents"] != "test-catalog" || receipt.RepositoryID != "test-catalog" {
+		t.Fatalf("receipt catalogs: %#v", catalogs)
+	}
+	if _, err := LoadReceipt(paths, Enrollment{}); err == nil {
+		t.Fatal("overlay receipt entries accepted without an enrolled overlay")
+	}
+	writeOverlay(t, overlayDir, nil, nil, false)
+	plan, err = Plan("all")
+	if err != nil || actionCount(plan, "remove") != 2 {
+		t.Fatalf("removal plan: %#v %v", plan, err)
+	}
+	for _, action := range plan.Actions {
+		if action.Action == "remove" && action.Catalog != "private" {
+			t.Fatalf("removal catalog: %#v", action)
+		}
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overlay link was not removed: %v", err)
+	}
+}
+
+func TestUnavailableOverlayNeverPlansRemoval(t *testing.T) {
+	home, repo := testEnvironment(t)
+	overlayDir := filepath.Join(filepath.Dir(repo), "overlay")
+	overlay := writeOverlay(t, overlayDir, []Projection{{Skill: "secret", Source: "skills/secret", Targets: []string{"agents"}}}, []Instruction{{Target: "claude-global", Source: "instructions/CLAUDE.md"}}, false)
+	if _, _, err := Enroll(repo, "test", overlay, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := ResolvePaths()
+	link := filepath.Join(home, ".agents", "skills", "secret")
+	instruction, _ := instructionDestination(paths, "claude-global")
+	snapshot := func() string {
+		receipt, err := os.ReadFile(paths.Receipt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err := os.Readlink(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copied, err := os.ReadFile(instruction)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(receipt) + "\x00" + target + "\x00" + string(copied)
+	}
+	before := snapshot()
+	for name, breakOverlay := range map[string]func(){
+		"missing": func() {
+			if err := os.RemoveAll(overlayDir); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"invalid": func() {
+			writeOverlay(t, overlayDir, nil, nil, false)
+			if err := os.WriteFile(filepath.Join(overlayDir, "terran.json"), []byte(`{"schema_version":2}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			breakOverlay()
+			if _, err := Plan("all"); !hasCode(err, CodeOverlayUnavailable) {
+				t.Fatalf("plan: %v", err)
+			}
+			if _, err := Apply("all", "test"); !hasCode(err, CodeOverlayUnavailable) {
+				t.Fatalf("apply: %v", err)
+			}
+			if _, err := Status("all"); !hasCode(err, CodeOverlayUnavailable) {
+				t.Fatalf("status: %v", err)
+			}
+			if after := snapshot(); after != before {
+				t.Fatal("destination or receipt changed while overlay was unavailable")
+			}
+		})
+	}
+}
+
+func hasCode(err error, code string) bool {
+	got, _ := ErrorCode(err)
+	return err != nil && got == code
+}
+
+func TestReEnrollKeepsHoldsAndAddsOverlay(t *testing.T) {
+	_, repo := testEnvironment(t)
+	first, _, err := Enroll(repo, "test", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Hold("skill/agents/example"); err != nil {
+		t.Fatal(err)
+	}
+	renamed, changed, err := Enroll(repo, "renamed", "", false)
+	if err != nil || !changed || renamed.DisplayName != "renamed" || renamed.CommandCenterID != first.CommandCenterID || !reflect.DeepEqual(renamed.Holds, []string{"skill/agents/example"}) {
+		t.Fatalf("rename: %#v changed=%v %v", renamed, changed, err)
+	}
+	overlay := writeOverlay(t, filepath.Join(filepath.Dir(repo), "overlay"), []Projection{{Skill: "secret", Source: "skills/secret", Targets: []string{"agents"}}}, nil, false)
+	added, changed, err := Enroll(repo, "", overlay, false)
+	if err != nil || !changed || added.OverlayID != "private" || added.DisplayName != "renamed" || !reflect.DeepEqual(added.Holds, renamed.Holds) {
+		t.Fatalf("add overlay: %#v changed=%v %v", added, changed, err)
+	}
+	again, changed, err := Enroll(repo, "again", "", false)
+	if err != nil || !changed || again.OverlayID != "private" || again.OverlayPath != overlay || !reflect.DeepEqual(again.Holds, renamed.Holds) {
+		t.Fatalf("rename kept overlay: %#v changed=%v %v", again, changed, err)
+	}
+	paths, _ := ResolvePaths()
+	if loaded, err := LoadEnrollment(paths); err != nil || !reflect.DeepEqual(loaded, again) {
+		t.Fatalf("persisted enrollment: %#v %v", loaded, err)
+	}
+}
+
+func TestOverlayChangeRefusedWhileItOwnsItems(t *testing.T) {
+	_, repo := testEnvironment(t)
+	base := filepath.Dir(repo)
+	secret := []Projection{{Skill: "secret", Source: "skills/secret", Targets: []string{"agents"}}}
+	overlayDir := filepath.Join(base, "overlay")
+	overlay := writeOverlay(t, overlayDir, secret, nil, false)
+	other := writeOverlay(t, filepath.Join(base, "other-overlay"), secret, nil, false)
+	if _, _, err := Enroll(repo, "test", overlay, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "", other, false); !hasCode(err, CodeRepositoryMismatch) {
+		t.Fatalf("overlay path change while owning items: %v", err)
+	}
+	if _, _, err := Enroll(repo, "", "", true); !hasCode(err, CodeRepositoryMismatch) {
+		t.Fatalf("overlay removal while owning items: %v", err)
+	}
+	paths, _ := ResolvePaths()
+	if loaded, err := LoadEnrollment(paths); err != nil || loaded.OverlayPath != overlay {
+		t.Fatalf("refused change was persisted: %#v %v", loaded, err)
+	}
+	writeOverlay(t, overlayDir, nil, nil, false)
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	changed, _, err := Enroll(repo, "", other, false)
+	if err != nil || changed.OverlayPath != other {
+		t.Fatalf("overlay change without owned items: %#v %v", changed, err)
+	}
+	if removed, _, err := Enroll(repo, "", "", true); err != nil || removed.OverlayID != "" || removed.OverlayPath != "" {
+		t.Fatalf("overlay removal without owned items: %#v %v", removed, err)
+	}
+}
+
+func TestApplyRevalidatesOverlayCatalog(t *testing.T) {
+	home, repo := testEnvironment(t)
+	overlay := writeOverlay(t, filepath.Join(filepath.Dir(repo), "overlay"), []Projection{{Skill: "secret", Source: "skills/secret", Targets: []string{"agents"}}}, []Instruction{{Target: "claude-global", Source: "instructions/CLAUDE.md"}}, false)
+	if _, _, err := Enroll(repo, "test", overlay, false); err != nil {
+		t.Fatal(err)
+	}
+	beforeInstructionMutation = func(Action) error {
+		path := filepath.Join(overlay, "terran.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, bytes.Replace(data, []byte(`"version": "0.1.0"`), []byte(`"version": "0.2.0"`), 1), 0o644)
+	}
+	t.Cleanup(func() { beforeInstructionMutation = nil })
+	if _, err := Apply("all", "test"); err == nil || !strings.Contains(err.Error(), "changed during apply") {
+		t.Fatalf("overlay change during apply was not detected: %v", err)
+	}
+	paths, _ := ResolvePaths()
+	if _, err := os.Lstat(filepath.Join(home, ".agents", "skills", "secret")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overlay skill mutation was not rolled back: %v", err)
+	}
+	if _, err := os.Lstat(paths.Receipt); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("receipt written after overlay change: %v", err)
 	}
 }

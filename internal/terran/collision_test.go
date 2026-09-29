@@ -43,7 +43,7 @@ func TestInteractiveReplacementAdoptsAndRestoresInstructionAndConfig(t *testing.
 			if err := os.WriteFile(destination, original, 0o640); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := Enroll(repo, "test", false); err != nil {
+			if _, _, err := Enroll(repo, "test", "", false); err != nil {
 				t.Fatal(err)
 			}
 			calls := 0
@@ -66,7 +66,7 @@ func TestInteractiveReplacementAdoptsAndRestoresInstructionAndConfig(t *testing.
 			if got, _ := os.ReadFile(backup); !bytes.Equal(got, original) || fileMode(t, backup) != 0o600 {
 				t.Fatal("private backup does not exactly preserve original")
 			}
-			receipt, err := LoadReceipt(paths)
+			receipt, err := LoadReceipt(paths, Enrollment{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -103,7 +103,7 @@ func TestInteractiveSkipContinuesAndRemainsCollision(t *testing.T) {
 	if err := os.WriteFile(blockedDestination, original, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	result, err := ApplyWithOptions("all", "test", ApplyOptions{ResolveCollision: func(Action) (CollisionDecision, error) { return CollisionSkip, nil }})
@@ -117,7 +117,7 @@ func TestInteractiveSkipContinuesAndRemainsCollision(t *testing.T) {
 	if _, err := os.Stat(other); err != nil {
 		t.Fatalf("other selected action did not apply: %v", err)
 	}
-	receipt, err := LoadReceipt(paths)
+	receipt, err := LoadReceipt(paths, Enrollment{})
 	if err != nil || len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "instruction" || receipt.Managed[0].Target != "opencode-global" {
 		t.Fatalf("skip gained ownership: %#v %v", receipt, err)
 	}
@@ -138,7 +138,7 @@ func TestInteractiveAbortAndIneligibleCollisionsNeverMutate(t *testing.T) {
 			destination, _ := instructionDestination(paths, target)
 			_ = os.WriteFile(destination, []byte(target+" original"), 0o640)
 		}
-		_, _, _ = Enroll(repo, "test", false)
+		_, _, _ = Enroll(repo, "test", "", false)
 		calls := 0
 		_, err := ApplyWithOptions("all", "test", ApplyOptions{ResolveCollision: func(Action) (CollisionDecision, error) {
 			calls++
@@ -169,7 +169,7 @@ func TestInteractiveAbortAndIneligibleCollisionsNeverMutate(t *testing.T) {
 		_, repo := instructionEnvironment(t, "claude-global", "opencode-global")
 		prepareInstructionParents(t)
 		paths, _ := ResolvePaths()
-		_, _, _ = Enroll(repo, "test", false)
+		_, _, _ = Enroll(repo, "test", "", false)
 		if _, err := Apply("claude", "test"); err != nil {
 			t.Fatal(err)
 		}
@@ -196,7 +196,7 @@ func TestLockedPlanConfirmationRunsAfterChoicesBeforeMutation(t *testing.T) {
 	if err := os.WriteFile(destination, original, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	order := []string{}
@@ -231,7 +231,7 @@ func TestLockedPlanChangeAfterConfirmationFailsBeforeMutation(t *testing.T) {
 	prepareInstructionParents(t)
 	paths, _ := ResolvePaths()
 	destination, _ := instructionDestination(paths, "claude-global")
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	confirmed := false
@@ -261,7 +261,7 @@ func TestLockedPlanConfirmationNotCalledForUnresolvedBlock(t *testing.T) {
 	if err := os.Mkdir(destination, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	called := false
@@ -282,7 +282,7 @@ func TestInteractiveDecisionRaceFailsBeforeMutation(t *testing.T) {
 	second, _ := instructionDestination(paths, "opencode-global")
 	_ = os.WriteFile(first, []byte("first"), 0o640)
 	_ = os.WriteFile(second, []byte("second"), 0o640)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	calls := 0
 	_, err := ApplyWithOptions("all", "test", ApplyOptions{ResolveCollision: func(Action) (CollisionDecision, error) {
 		calls++
@@ -311,7 +311,7 @@ func TestInteractiveReplacementFailureRollsBackActiveAndBackup(t *testing.T) {
 	destination, _ := instructionDestination(paths, "claude-global")
 	original := []byte("original")
 	_ = os.WriteFile(destination, original, 0o640)
-	_, _, _ = Enroll(repo, "test", false)
+	_, _, _ = Enroll(repo, "test", "", false)
 	beforeReceiptWrite = func() error { return errors.New("forced receipt failure") }
 	t.Cleanup(func() { beforeReceiptWrite = nil })
 	_, err := ApplyWithOptions("claude", "test", ApplyOptions{ResolveCollision: func(Action) (CollisionDecision, error) { return CollisionReplace, nil }})
@@ -351,7 +351,7 @@ func TestInteractiveReplacementNeverOverwritesRacingDestination(t *testing.T) {
 			if err := os.WriteFile(destination, original, 0o640); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := Enroll(repo, "test", false); err != nil {
+			if _, _, err := Enroll(repo, "test", "", false); err != nil {
 				t.Fatal(err)
 			}
 			hook := func(Action) error {
@@ -377,7 +377,7 @@ func TestInteractiveReplacementNeverOverwritesRacingDestination(t *testing.T) {
 			if got, readErr := os.ReadFile(destination); readErr != nil || !bytes.Equal(got, newer) {
 				t.Fatalf("newer destination bytes were lost: got=%q err=%v apply=%v", got, readErr, err)
 			}
-			if _, loadErr := LoadReceipt(paths); !errors.Is(loadErr, os.ErrNotExist) {
+			if _, loadErr := LoadReceipt(paths, Enrollment{}); !errors.Is(loadErr, os.ErrNotExist) {
 				t.Fatalf("race falsely recorded ownership: %v", loadErr)
 			}
 			backup, readErr := os.ReadFile(instructionBackup(paths, "claude-global"))
@@ -403,7 +403,7 @@ func TestInteractiveReplacementPreservesOpenFDWritesInRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer openFile.Close()
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	beforeReplacementInstall = func(Action) error {
@@ -434,7 +434,7 @@ func TestInteractiveReplacementPreservesOpenFDWritesInRecovery(t *testing.T) {
 	if !found {
 		t.Fatalf("newer open-fd bytes were not preserved: %#v", recoveries)
 	}
-	if _, loadErr := LoadReceipt(paths); !errors.Is(loadErr, os.ErrNotExist) {
+	if _, loadErr := LoadReceipt(paths, Enrollment{}); !errors.Is(loadErr, os.ErrNotExist) {
 		t.Fatalf("open-fd race falsely recorded ownership: %v", loadErr)
 	}
 }
@@ -459,7 +459,7 @@ func TestInterruptedReplacementBackupBlocksRestartAdoption(t *testing.T) {
 	if err := os.WriteFile(backup, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Enroll(repo, "test", false); err != nil {
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	plan, err := Plan("claude")
@@ -499,7 +499,7 @@ func TestReplacementTempCleanupFailureRollsBackInstalledFile(t *testing.T) {
 			if err := os.WriteFile(destination, original, 0o640); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := Enroll(repo, "test", false); err != nil {
+			if _, _, err := Enroll(repo, "test", "", false); err != nil {
 				t.Fatal(err)
 			}
 			beforeReplacementCleanup = tc.hook
@@ -511,7 +511,7 @@ func TestReplacementTempCleanupFailureRollsBackInstalledFile(t *testing.T) {
 			if got, readErr := os.ReadFile(destination); readErr != nil || !bytes.Equal(got, original) {
 				t.Fatalf("cleanup failure left falsely unowned managed bytes: %q %v apply=%v", got, readErr, err)
 			}
-			if _, loadErr := LoadReceipt(paths); !errors.Is(loadErr, os.ErrNotExist) {
+			if _, loadErr := LoadReceipt(paths, Enrollment{}); !errors.Is(loadErr, os.ErrNotExist) {
 				t.Fatalf("cleanup failure wrote receipt: %v", loadErr)
 			}
 		})
@@ -527,7 +527,7 @@ func TestBackupPublicationRacesPreserveUnexpectedBytes(t *testing.T) {
 		if err := os.WriteFile(destination, []byte("original"), 0o640); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := Enroll(repo, "test", false); err != nil {
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
 			t.Fatal(err)
 		}
 		backup := instructionBackup(paths, "claude-global")
@@ -551,7 +551,7 @@ func TestBackupPublicationRacesPreserveUnexpectedBytes(t *testing.T) {
 		if err := os.WriteFile(destination, []byte("original"), 0o640); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := Enroll(repo, "test", false); err != nil {
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
 			t.Fatal(err)
 		}
 		backup := instructionBackup(paths, "claude-global")

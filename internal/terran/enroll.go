@@ -31,6 +31,9 @@ func LoadEnrollment(paths Paths) (Enrollment, error) {
 	if enrollment.SchemaVersion != SchemaVersion || enrollment.RepositoryID == "" || enrollment.RepositoryPath == "" || enrollment.CommandCenterID == "" || enrollment.DisplayName == "" {
 		return Enrollment{}, Coded(CodeUnsafeState, nextState, fmt.Errorf("invalid enrollment config"))
 	}
+	if (enrollment.OverlayID == "") != (enrollment.OverlayPath == "") || (enrollment.OverlayID != "" && (!skillNamePattern.MatchString(enrollment.OverlayID) || enrollment.OverlayID == enrollment.RepositoryID || !filepath.IsAbs(enrollment.OverlayPath) || filepath.Clean(enrollment.OverlayPath) != enrollment.OverlayPath)) {
+		return Enrollment{}, Coded(CodeUnsafeState, nextState, fmt.Errorf("invalid enrollment overlay"))
+	}
 	for i, id := range enrollment.Holds {
 		if _, _, _, err := ParseItemID(id); err != nil || (i > 0 && enrollment.Holds[i-1] >= id) {
 			return Enrollment{}, Coded(CodeUnsafeState, nextState, fmt.Errorf("invalid enrollment holds"))
@@ -123,7 +126,11 @@ func EnrollmentMissing(paths Paths) (bool, error) {
 	return true, nil
 }
 
-func Enroll(repo, name string, replace bool) (Enrollment, bool, error) {
+// Enroll records the primary catalog and, when overlay is non-empty, a private
+// overlay catalog. Re-enrolling the same primary may rename the Command Center
+// or add an overlay; an omitted overlay keeps the enrolled one unless replace
+// is set. Holds survive re-enrollment of the same primary.
+func Enroll(repo, name, overlay string, replace bool) (Enrollment, bool, error) {
 	paths, err := ResolvePaths()
 	if err != nil {
 		return Enrollment{}, false, err
@@ -131,6 +138,17 @@ func Enroll(repo, name string, replace bool) (Enrollment, bool, error) {
 	loaded, err := LoadManifest(repo)
 	if err != nil {
 		return Enrollment{}, false, err
+	}
+	var overlayID, overlayPath string
+	if overlay != "" {
+		overlayLoaded, err := LoadManifest(overlay)
+		if err != nil {
+			return Enrollment{}, false, err
+		}
+		if _, err := combineCatalogs(loaded, &overlayLoaded); err != nil {
+			return Enrollment{}, false, err
+		}
+		overlayID, overlayPath = overlayLoaded.Manifest.ID, overlayLoaded.Repository
 	}
 	explicitName := name != ""
 	if !explicitName {
@@ -147,15 +165,28 @@ func Enroll(repo, name string, replace bool) (Enrollment, bool, error) {
 	err = withLock(paths.Lock, func() error {
 		var emptyReceipt bool
 		existing, loadErr := LoadEnrollment(paths)
-		if loadErr == nil {
-			if existing.RepositoryPath == loaded.Repository && existing.RepositoryID == loaded.Manifest.ID {
-				result = existing
+		sameRepository := loadErr == nil && existing.RepositoryPath == loaded.Repository && existing.RepositoryID == loaded.Manifest.ID
+		if sameRepository {
+			result = existing
+			if explicitName {
+				result.DisplayName = name
+			}
+			if overlay != "" || replace {
+				result.OverlayID, result.OverlayPath = overlayID, overlayPath
+			}
+			if result.OverlayID != existing.OverlayID || result.OverlayPath != existing.OverlayPath {
+				if err := refuseOwnedOverlayChange(paths, existing); err != nil {
+					return err
+				}
+			}
+			if result.DisplayName == existing.DisplayName && result.OverlayID == existing.OverlayID && result.OverlayPath == existing.OverlayPath {
 				return nil
 			}
+		} else if loadErr == nil {
 			if !replace {
 				return fmt.Errorf("a different repository is enrolled; use --replace")
 			}
-			receipt, receiptErr := LoadReceipt(paths)
+			receipt, receiptErr := LoadReceipt(paths, existing)
 			if receiptErr == nil && (len(receipt.Projections) != 0 || len(receipt.Managed) != 0) {
 				return fmt.Errorf("cannot replace enrollment while managed skills, instructions, or configs remain; decommission them or migrate ownership first")
 			}
@@ -166,26 +197,31 @@ func Enroll(repo, name string, replace bool) (Enrollment, bool, error) {
 		} else if !errors.Is(loadErr, os.ErrNotExist) {
 			return fmt.Errorf("read enrollment: %w", loadErr)
 		}
-		id, err := randomID()
-		if err != nil {
-			return err
-		}
-		if loadErr == nil {
-			id = existing.CommandCenterID
-		}
-		result = Enrollment{
-			SchemaVersion:   SchemaVersion,
-			RepositoryID:    loaded.Manifest.ID,
-			RepositoryPath:  loaded.Repository,
-			CommandCenterID: id,
-			DisplayName:     name,
-		}
-		var retiredReceipt string
-		if emptyReceipt {
-			retiredReceipt, err = retireEmptyReceipt(paths)
+		if !sameRepository {
+			id, err := randomID()
 			if err != nil {
 				return err
 			}
+			if loadErr == nil {
+				id = existing.CommandCenterID
+			}
+			result = Enrollment{
+				SchemaVersion:   SchemaVersion,
+				RepositoryID:    loaded.Manifest.ID,
+				RepositoryPath:  loaded.Repository,
+				CommandCenterID: id,
+				DisplayName:     name,
+				OverlayID:       overlayID,
+				OverlayPath:     overlayPath,
+			}
+		}
+		var retiredReceipt string
+		if emptyReceipt {
+			retired, err := retireEmptyReceipt(paths, existing)
+			if err != nil {
+				return err
+			}
+			retiredReceipt = retired
 		}
 		if beforeEnrollmentConfigWrite != nil {
 			if err := beforeEnrollmentConfigWrite(); err != nil {
@@ -221,8 +257,34 @@ func Enroll(repo, name string, replace bool) (Enrollment, bool, error) {
 	return result, changed, err
 }
 
-func retireEmptyReceipt(paths Paths) (string, error) {
-	receipt, err := LoadReceipt(paths)
+// refuseOwnedOverlayChange blocks changing or removing an enrolled overlay
+// while the receipt still owns items from it; otherwise those items could no
+// longer be verified or removed safely.
+func refuseOwnedOverlayChange(paths Paths, existing Enrollment) error {
+	if existing.OverlayID == "" {
+		return nil
+	}
+	receipt, err := LoadReceipt(paths, existing)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("read receipt before overlay change: %w", err)
+	}
+	owned := false
+	for _, projection := range receipt.Projections {
+		owned = owned || projection.Catalog == existing.OverlayID
+	}
+	for _, managed := range receipt.Managed {
+		owned = owned || managed.Catalog == existing.OverlayID
+	}
+	if owned {
+		return Coded(CodeRepositoryMismatch, "remove the overlay-owned items from the "+existing.OverlayID+" catalog and run terran apply before changing the overlay", fmt.Errorf("overlay %s still owns managed items", existing.OverlayID))
+	}
+	return nil
+}
+
+func retireEmptyReceipt(paths Paths, existing Enrollment) (string, error) {
+	receipt, err := LoadReceipt(paths, existing)
 	if err != nil {
 		return "", fmt.Errorf("validate empty receipt before replacement: %w", err)
 	}

@@ -162,7 +162,7 @@ func TestCLIJSONOperationalAndBlockedExitCodes(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(repo, "skills", "example"), 0o755)
 	_ = os.WriteFile(filepath.Join(repo, "skills", "example", "SKILL.md"), []byte("---\nname: example\n---\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(repo, "terran.json"), []byte(`{"schema_version":1,"id":"test-catalog","version":"0.1.0","projections":[{"skill":"example","source":"skills/example","targets":["agents"]}]}`), 0o644)
-	if _, _, err := terran.Enroll(repo, "test", false); err != nil {
+	if _, _, err := terran.Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(home, ".agents", "skills")
@@ -228,7 +228,7 @@ func TestCLIInstructionJSONHumanAndOpenCodeTarget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "terran.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := terran.Enroll(repo, "test", false); err != nil {
+	if _, _, err := terran.Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	var out, errOut bytes.Buffer
@@ -300,7 +300,7 @@ func cliConfigCollisionEnvironment(t *testing.T) (destination, source string, or
 	if err := os.WriteFile(destination, original, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := terran.Enroll(repo, "test", false); err != nil {
+	if _, _, err := terran.Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	return destination, source, original
@@ -346,7 +346,7 @@ func TestCLIHoldAndUnhold(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "terran.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := terran.Enroll(repo, "test", false); err != nil {
+	if _, _, err := terran.Enroll(repo, "test", "", false); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct {
@@ -375,4 +375,40 @@ func TestCLIHoldAndUnhold(t *testing.T) {
 	var out, errOut bytes.Buffer
 	run([]string{"hold", "instruction/other", "--json"}, &out, &errOut)
 	assertJSONError(t, out.Bytes(), terran.CodeUnknownItem, "hold failed", "run terran plan --json to list item ids")
+}
+
+func TestCLIEnrollOverlayJSONAndUnavailableOverlay(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	_ = os.MkdirAll(home, 0o755)
+	for id, dir := range map[string]string{"test-catalog": "repo", "private": "overlay"} {
+		skill := filepath.Join(base, dir, "skills", id)
+		_ = os.MkdirAll(skill, 0o755)
+		_ = os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: "+id+"\n---\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(base, dir, "terran.json"), []byte(`{"schema_version":2,"id":"`+id+`","version":"0.1.0","projections":[{"skill":"`+id+`","source":"skills/`+id+`","targets":["agents"]}]}`), 0o644)
+	}
+	overlay, _ := filepath.EvalSymlinks(filepath.Join(base, "overlay"))
+	var out, errOut bytes.Buffer
+	if code := run([]string{"enroll", "--repo", filepath.Join(base, "repo"), "--name", "cc1", "--overlay", overlay, "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("enroll code=%d stderr=%q", code, errOut.String())
+	}
+	var enrolled struct {
+		Changed    bool              `json:"changed"`
+		Enrollment terran.Enrollment `json:"enrollment"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &enrolled); err != nil || !enrolled.Changed || enrolled.Enrollment.OverlayID != "private" || enrolled.Enrollment.OverlayPath != overlay {
+		t.Fatalf("enroll JSON: %q %v", out.String(), err)
+	}
+	if err := os.RemoveAll(overlay); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"plan", "--json"}, &out, &errOut); code != 1 {
+		t.Fatalf("plan code=%d stdout=%q", code, out.String())
+	}
+	assertJSONError(t, out.Bytes(), terran.CodeOverlayUnavailable, "plan failed", "clone the private catalog to "+overlay+" or re-enroll")
 }

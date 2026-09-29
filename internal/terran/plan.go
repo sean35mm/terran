@@ -35,7 +35,10 @@ func selectedConfig(filter, target string) bool {
 	return filter == "all" || (ok && spec.Group == filter)
 }
 
-func LoadReceipt(paths Paths) (receipt Receipt, err error) {
+// LoadReceipt validates the receipt against the enrollment: every entry must
+// belong to the primary catalog or the enrolled overlay, with its source inside
+// that catalog's repository.
+func LoadReceipt(paths Paths, enrollment Enrollment) (receipt Receipt, err error) {
 	defer func() {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			err = Coded(CodeReceiptInvalid, nextState, err)
@@ -52,9 +55,19 @@ func LoadReceipt(paths Paths) (receipt Receipt, err error) {
 	if receipt.SchemaVersion != SchemaVersion || receipt.RepositoryID == "" || !filepath.IsAbs(receipt.RepositoryPath) || filepath.Clean(receipt.RepositoryPath) != receipt.RepositoryPath {
 		return Receipt{}, fmt.Errorf("invalid receipt repository")
 	}
+	catalogRepository := func(catalog string) (string, bool) {
+		switch {
+		case catalog == receipt.RepositoryID:
+			return receipt.RepositoryPath, true
+		case enrollment.OverlayID != "" && catalog == enrollment.OverlayID:
+			return enrollment.OverlayPath, true
+		}
+		return "", false
+	}
 	seen := map[string]bool{}
 	for _, p := range receipt.Projections {
-		if p.Catalog != receipt.RepositoryID || !skillNamePattern.MatchString(p.Skill) || p.Strategy != "symlink" || !filepath.IsAbs(p.Source) {
+		repository, known := catalogRepository(p.Catalog)
+		if !known || !skillNamePattern.MatchString(p.Skill) || p.Strategy != "symlink" || !filepath.IsAbs(p.Source) {
 			return Receipt{}, fmt.Errorf("invalid receipt projection")
 		}
 		if _, ok := lookupTarget("skill", p.Target); !ok {
@@ -64,7 +77,7 @@ func LoadReceipt(paths Paths) (receipt Receipt, err error) {
 		if destinationErr != nil || p.Destination != destination {
 			return Receipt{}, fmt.Errorf("unsafe receipt destination for %s/%s", p.Skill, p.Target)
 		}
-		if filepath.Clean(p.Source) != p.Source || !contained(receipt.RepositoryPath, p.Source) {
+		if filepath.Clean(p.Source) != p.Source || !contained(repository, p.Source) {
 			return Receipt{}, fmt.Errorf("unsafe receipt source for %s/%s", p.Skill, p.Target)
 		}
 		if canonical, err := filepath.EvalSymlinks(p.Source); err == nil && canonical != p.Source {
@@ -80,7 +93,8 @@ func LoadReceipt(paths Paths) (receipt Receipt, err error) {
 	}
 	seen = map[string]bool{}
 	for _, managed := range receipt.Managed {
-		if (managed.Kind != "instruction" && managed.Kind != "config") || managed.Catalog != receipt.RepositoryID || managed.Name != "" {
+		repository, known := catalogRepository(managed.Catalog)
+		if (managed.Kind != "instruction" && managed.Kind != "config") || !known || managed.Name != "" {
 			return Receipt{}, fmt.Errorf("invalid receipt managed entry")
 		}
 		destination, err := managedFileDestination(paths, managed.Kind, managed.Target)
@@ -92,7 +106,7 @@ func LoadReceipt(paths Paths) (receipt Receipt, err error) {
 			return Receipt{}, fmt.Errorf("duplicate receipt %s", managed.Kind)
 		}
 		seen[key] = true
-		if managed.Destination != destination || !filepath.IsAbs(managed.Source) || filepath.Clean(managed.Source) != managed.Source || !contained(receipt.RepositoryPath, managed.Source) {
+		if managed.Destination != destination || !filepath.IsAbs(managed.Source) || filepath.Clean(managed.Source) != managed.Source || !contained(repository, managed.Source) {
 			return Receipt{}, fmt.Errorf("unsafe receipt %s paths for %s", managed.Kind, managed.Target)
 		}
 		switch managed.Origin {
@@ -135,22 +149,30 @@ func Plan(target string) (PlanResult, error) {
 }
 
 func planEnrolled(paths Paths, enrollment Enrollment, target string) (PlanResult, error) {
-	loaded, err := LoadManifest(enrollment.RepositoryPath)
+	catalogs, receipt, err := loadPlanInputs(paths, enrollment)
 	if err != nil {
 		return PlanResult{}, err
 	}
-	if loaded.Manifest.ID != enrollment.RepositoryID {
-		return PlanResult{}, Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("enrolled repository id changed"))
+	return makePlan(paths, catalogs, receipt, enrollment.Holds, target)
+}
+
+// loadPlanInputs loads every enrolled catalog before the receipt so an
+// unavailable overlay fails closed instead of its owned items being planned
+// for removal.
+func loadPlanInputs(paths Paths, enrollment Enrollment) (Catalogs, Receipt, error) {
+	catalogs, err := LoadCatalogs(enrollment)
+	if err != nil {
+		return Catalogs{}, Receipt{}, err
 	}
-	receipt, err := LoadReceipt(paths)
+	receipt, err := LoadReceipt(paths, enrollment)
 	if errors.Is(err, os.ErrNotExist) {
 		receipt = Receipt{}
 	} else if err != nil {
-		return PlanResult{}, fmt.Errorf("load receipt: %w", err)
-	} else if receipt.RepositoryID != enrollment.RepositoryID || receipt.RepositoryPath != loaded.Repository {
-		return PlanResult{}, Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("receipt repository differs from enrollment"))
+		return Catalogs{}, Receipt{}, fmt.Errorf("load receipt: %w", err)
+	} else if receipt.RepositoryID != enrollment.RepositoryID || receipt.RepositoryPath != catalogs.Primary.Repository {
+		return Catalogs{}, Receipt{}, Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("receipt repository differs from enrollment"))
 	}
-	return makePlan(paths, loaded, receipt, enrollment.Holds, target)
+	return catalogs, receipt, nil
 }
 
 // currentPlatform is a variable so tests can simulate another platform.
@@ -173,7 +195,7 @@ func platformIncluded(platforms []string) bool {
 // inert actions never touch the machine: the item is held or not for this platform.
 func inert(action Action) bool { return action.Action == "held" || action.Action == "excluded" }
 
-func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, holds []string, filter string) (PlanResult, error) {
+func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, filter string) (PlanResult, error) {
 	held := make(map[string]bool, len(holds))
 	for _, id := range holds {
 		held[id] = true
@@ -206,26 +228,28 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, holds []strin
 		}
 	}
 	desiredSkills := map[string]bool{}
-	for _, projection := range loaded.Manifest.Projections {
-		for _, target := range projection.Targets {
-			if !selectedSkill(filter, target) {
-				continue
-			}
-			destination, _ := skillDestination(paths, target, projection.Skill)
-			action := Action{ID: ItemID("skill", target, projection.Skill), Kind: "skill", Skill: projection.Skill, Target: target, Source: loaded.Sources[projection.Skill], Destination: destination}
-			key := pairKey(projection.Skill, target)
-			prior, owned := ownedSkills[key]
-			if !platformIncluded(projection.Platforms) {
-				// An owned projection falls through to the removal loop below.
-				if !owned {
-					add(action, excluded(projection.Platforms))
+	for _, loaded := range catalogs.list() {
+		for _, projection := range loaded.Manifest.Projections {
+			for _, target := range projection.Targets {
+				if !selectedSkill(filter, target) {
+					continue
 				}
-				continue
+				destination, _ := skillDestination(paths, target, projection.Skill)
+				action := Action{ID: ItemID("skill", target, projection.Skill), Kind: "skill", Catalog: loaded.Manifest.ID, Skill: projection.Skill, Target: target, Source: loaded.Sources[projection.Skill], Destination: destination}
+				key := pairKey(projection.Skill, target)
+				prior, owned := ownedSkills[key]
+				if !platformIncluded(projection.Platforms) {
+					// An owned projection falls through to the removal loop below.
+					if !owned {
+						add(action, excluded(projection.Platforms))
+					}
+					continue
+				}
+				desiredSkills[key] = true
+				add(action, func() (string, string) {
+					return classifyLeaf(filepath.Dir(action.Destination), action.Destination, action.Source, prior, owned)
+				})
 			}
-			desiredSkills[key] = true
-			add(action, func() (string, string) {
-				return classifyLeaf(filepath.Dir(action.Destination), action.Destination, action.Source, prior, owned)
-			})
 		}
 	}
 	for key, prior := range ownedSkills {
@@ -233,7 +257,7 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, holds []strin
 			continue
 		}
 		destination, _ := skillDestination(paths, prior.Target, prior.Skill)
-		action := Action{ID: ItemID("skill", prior.Target, prior.Skill), Kind: "skill", Skill: prior.Skill, Target: prior.Target, Source: prior.Source, Destination: destination}
+		action := Action{ID: ItemID("skill", prior.Target, prior.Skill), Kind: "skill", Catalog: prior.Catalog, Skill: prior.Skill, Target: prior.Target, Source: prior.Source, Destination: destination}
 		add(action, func() (string, string) {
 			if exactSymlink(action.Destination, prior.Source) {
 				return "remove", ""
@@ -242,63 +266,67 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, holds []strin
 		})
 	}
 	desiredInstructions := map[string]bool{}
-	for _, instruction := range loaded.Manifest.Instructions {
-		if !selectedInstruction(filter, instruction.Target) {
-			continue
-		}
-		destination, _ := instructionDestination(paths, instruction.Target)
-		if contained(loaded.Repository, destination) {
-			return PlanResult{}, fmt.Errorf("instruction destination for %s must not be inside the repository", instruction.Target)
-		}
-		action := Action{ID: ItemID("instruction", instruction.Target, ""), Kind: "instruction", Target: instruction.Target, Source: loaded.InstructionSources[instruction.Target], Destination: destination}
-		prior, owned := ownedInstructions[instruction.Target]
-		if !platformIncluded(instruction.Platforms) {
-			if !owned {
-				add(action, excluded(instruction.Platforms))
+	for _, loaded := range catalogs.list() {
+		for _, instruction := range loaded.Manifest.Instructions {
+			if !selectedInstruction(filter, instruction.Target) {
+				continue
 			}
-			continue
+			destination, _ := instructionDestination(paths, instruction.Target)
+			if catalogs.insideAny(destination) {
+				return PlanResult{}, fmt.Errorf("instruction destination for %s must not be inside a catalog repository", instruction.Target)
+			}
+			action := Action{ID: ItemID("instruction", instruction.Target, ""), Kind: "instruction", Catalog: loaded.Manifest.ID, Target: instruction.Target, Source: loaded.InstructionSources[instruction.Target], Destination: destination}
+			prior, owned := ownedInstructions[instruction.Target]
+			if !platformIncluded(instruction.Platforms) {
+				if !owned {
+					add(action, excluded(instruction.Platforms))
+				}
+				continue
+			}
+			desiredInstructions[instruction.Target] = true
+			add(action, func() (string, string) {
+				return classifyInstruction(paths, action, loaded.InstructionHashes[instruction.Target], prior, owned)
+			})
 		}
-		desiredInstructions[instruction.Target] = true
-		add(action, func() (string, string) {
-			return classifyInstruction(paths, action, loaded.InstructionHashes[instruction.Target], prior, owned)
-		})
 	}
 	for _, prior := range ownedInstructions {
 		if !selectedInstruction(filter, prior.Target) || desiredInstructions[prior.Target] {
 			continue
 		}
 		destination, _ := instructionDestination(paths, prior.Target)
-		action := Action{ID: ItemID("instruction", prior.Target, ""), Kind: "instruction", Target: prior.Target, Source: prior.Source, Destination: destination}
+		action := Action{ID: ItemID("instruction", prior.Target, ""), Kind: "instruction", Catalog: prior.Catalog, Target: prior.Target, Source: prior.Source, Destination: destination}
 		add(action, func() (string, string) { return classifyInstructionRemoval(paths, prior, destination) })
 	}
 	desiredConfigs := map[string]bool{}
-	for _, config := range loaded.Manifest.Configs {
-		if !selectedConfig(filter, config.Target) {
-			continue
-		}
-		destination, _ := configDestination(paths, config.Target)
-		if contained(loaded.Repository, destination) {
-			return PlanResult{}, fmt.Errorf("config destination for %s must not be inside the repository", config.Target)
-		}
-		action := Action{ID: ItemID("config", config.Target, ""), Kind: "config", Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination}
-		prior, owned := ownedConfigs[config.Target]
-		if !platformIncluded(config.Platforms) {
-			if !owned {
-				add(action, excluded(config.Platforms))
+	for _, loaded := range catalogs.list() {
+		for _, config := range loaded.Manifest.Configs {
+			if !selectedConfig(filter, config.Target) {
+				continue
 			}
-			continue
+			destination, _ := configDestination(paths, config.Target)
+			if catalogs.insideAny(destination) {
+				return PlanResult{}, fmt.Errorf("config destination for %s must not be inside a catalog repository", config.Target)
+			}
+			action := Action{ID: ItemID("config", config.Target, ""), Kind: "config", Catalog: loaded.Manifest.ID, Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination}
+			prior, owned := ownedConfigs[config.Target]
+			if !platformIncluded(config.Platforms) {
+				if !owned {
+					add(action, excluded(config.Platforms))
+				}
+				continue
+			}
+			desiredConfigs[config.Target] = true
+			add(action, func() (string, string) {
+				return classifyInstruction(paths, action, loaded.ConfigHashes[config.Target], prior, owned)
+			})
 		}
-		desiredConfigs[config.Target] = true
-		add(action, func() (string, string) {
-			return classifyInstruction(paths, action, loaded.ConfigHashes[config.Target], prior, owned)
-		})
 	}
 	for _, prior := range ownedConfigs {
 		if !selectedConfig(filter, prior.Target) || desiredConfigs[prior.Target] {
 			continue
 		}
 		destination, _ := configDestination(paths, prior.Target)
-		action := Action{ID: ItemID("config", prior.Target, ""), Kind: "config", Target: prior.Target, Source: prior.Source, Destination: destination}
+		action := Action{ID: ItemID("config", prior.Target, ""), Kind: "config", Catalog: prior.Catalog, Target: prior.Target, Source: prior.Source, Destination: destination}
 		add(action, func() (string, string) { return classifyInstructionRemoval(paths, prior, destination) })
 	}
 	sort.Slice(actions, func(i, j int) bool {
@@ -554,22 +582,11 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		if err != nil {
 			return err
 		}
-		loaded, err := LoadManifest(enrollment.RepositoryPath)
+		catalogs, receipt, err := loadPlanInputs(paths, enrollment)
 		if err != nil {
 			return err
 		}
-		if loaded.Manifest.ID != enrollment.RepositoryID {
-			return Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("enrolled repository id changed"))
-		}
-		receipt, err := LoadReceipt(paths)
-		if errors.Is(err, os.ErrNotExist) {
-			receipt = Receipt{}
-		} else if err != nil {
-			return err
-		} else if receipt.RepositoryID != enrollment.RepositoryID || receipt.RepositoryPath != loaded.Repository {
-			return Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("receipt repository differs from enrollment"))
-		}
-		result, err = makePlan(paths, loaded, receipt, enrollment.Holds, target)
+		result, err = makePlan(paths, catalogs, receipt, enrollment.Holds, target)
 		if err != nil {
 			return err
 		}
@@ -578,6 +595,10 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			action := result.Actions[i]
 			if action.Action != "blocked_collision" || options.ResolveCollision == nil {
 				continue
+			}
+			loaded, err := catalogs.catalog(action.Catalog)
+			if err != nil {
+				return err
 			}
 			state, eligible := resolvableCollision(paths, loaded, action)
 			if !eligible {
@@ -609,7 +630,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				return fmt.Errorf("confirm plan: %w", err)
 			}
 		}
-		if err := revalidateLoadedManifest(loaded); err != nil {
+		if err := revalidateCatalogs(catalogs); err != nil {
 			return fmt.Errorf("revalidate catalog: %w", err)
 		}
 		ownedSkills := map[string]ReceiptProjection{}
@@ -621,7 +642,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			ownedInstructions[managed.Target] = managed
 		}
 		for _, action := range result.Actions {
-			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions, resolved); err != nil {
+			if err := preflightAction(paths, catalogs, action, ownedSkills, ownedInstructions, resolved); err != nil {
 				return err
 			}
 		}
@@ -630,12 +651,12 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			if action.Kind != "skill" || inert(action) {
 				continue
 			}
-			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions, resolved); err != nil {
+			if err := preflightAction(paths, catalogs, action, ownedSkills, ownedInstructions, resolved); err != nil {
 				return errors.Join(err, rollbackSkills(skillRollbacks))
 			}
 			rollback := prepareSkillRollback(action, ownedSkills)
 			skillRollbacks = append(skillRollbacks, rollback)
-			if err := mutateSkill(paths, loaded, action, ownedSkills); err != nil {
+			if err := mutateSkill(paths, catalogs, action, ownedSkills); err != nil {
 				return errors.Join(err, rollbackSkills(skillRollbacks))
 			}
 		}
@@ -645,13 +666,17 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			if action.Kind == "skill" || action.Action == "noop" || action.Action == "skip" || inert(action) {
 				continue
 			}
-			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions, resolved); err != nil {
+			if err := preflightAction(paths, catalogs, action, ownedSkills, ownedInstructions, resolved); err != nil {
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 			}
 			if beforeInstructionMutation != nil {
 				if err := beforeInstructionMutation(action); err != nil {
 					return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 				}
+			}
+			loaded, err := catalogs.catalog(action.Catalog)
+			if err != nil {
+				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 			}
 			var sourceBytes []byte
 			if expectedHash, desired := managedSourceHash(loaded, action.Kind, action.Target); desired {
@@ -669,7 +694,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 			}
 		}
-		if err := revalidateLoadedManifest(loaded); err != nil {
+		if err := revalidateCatalogs(catalogs); err != nil {
 			return errors.Join(fmt.Errorf("revalidate catalog before receipt: %w", err), rollbackAll(rollbacks, skillRollbacks))
 		}
 		// Held items keep their receipt entries untouched; platform-excluded
@@ -683,43 +708,36 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		untouched := func(kind, target, name string, platforms []string) bool {
 			return !platformIncluded(platforms) || heldIDs[ItemID(kind, target, name)]
 		}
-		for _, instruction := range loaded.Manifest.Instructions {
-			if !selectedInstruction(target, instruction.Target) || untouched("instruction", instruction.Target, "", instruction.Platforms) {
-				continue
+		for _, loaded := range catalogs.list() {
+			for _, instruction := range loaded.Manifest.Instructions {
+				if !selectedInstruction(target, instruction.Target) || untouched("instruction", instruction.Target, "", instruction.Platforms) {
+					continue
+				}
+				if actionFor(result, "instruction", instruction.Target).Action == "skip" {
+					continue
+				}
+				data, err := readVerifiedInstructionSource(loaded.Repository, instruction.Target, loaded.InstructionSources[instruction.Target], loaded.InstructionHashes[instruction.Target])
+				if err != nil {
+					return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
+				}
+				verifiedInstructionHashes[instruction.Target] = hashBytes(data)
 			}
-			if actionFor(result, "instruction", instruction.Target).Action == "skip" {
-				continue
+			for _, config := range loaded.Manifest.Configs {
+				if !selectedConfig(target, config.Target) || untouched("config", config.Target, "", config.Platforms) {
+					continue
+				}
+				data, err := readVerifiedManagedSource(loaded.Repository, "config", config.Target, loaded.ConfigSources[config.Target], loaded.ConfigHashes[config.Target])
+				if err != nil {
+					return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
+				}
+				verifiedInstructionHashes[config.Target] = hashBytes(data)
 			}
-			data, err := readVerifiedInstructionSource(loaded.Repository, instruction.Target, loaded.InstructionSources[instruction.Target], loaded.InstructionHashes[instruction.Target])
-			if err != nil {
-				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
-			}
-			verifiedInstructionHashes[instruction.Target] = hashBytes(data)
-		}
-		for _, config := range loaded.Manifest.Configs {
-			if !selectedConfig(target, config.Target) || untouched("config", config.Target, "", config.Platforms) {
-				continue
-			}
-			data, err := readVerifiedManagedSource(loaded.Repository, "config", config.Target, loaded.ConfigSources[config.Target], loaded.ConfigHashes[config.Target])
-			if err != nil {
-				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
-			}
-			verifiedInstructionHashes[config.Target] = hashBytes(data)
 		}
 		now := time.Now().UTC()
-		newReceipt := Receipt{SchemaVersion: SchemaVersion, RepositoryID: enrollment.RepositoryID, RepositoryPath: enrollment.RepositoryPath, RepositoryVersion: loaded.Manifest.Version, ManifestFingerprint: loaded.Fingerprint}
+		newReceipt := Receipt{SchemaVersion: SchemaVersion, RepositoryID: enrollment.RepositoryID, RepositoryPath: enrollment.RepositoryPath, RepositoryVersion: catalogs.Primary.Manifest.Version, ManifestFingerprint: catalogs.Fingerprint}
 		for _, old := range receipt.Projections {
 			if !selectedSkill(target, old.Target) || heldIDs[ItemID("skill", old.Target, old.Skill)] {
 				newReceipt.Projections = append(newReceipt.Projections, old)
-			}
-		}
-		for _, projection := range loaded.Manifest.Projections {
-			for _, destinationTarget := range projection.Targets {
-				if !selectedSkill(target, destinationTarget) || untouched("skill", destinationTarget, projection.Skill, projection.Platforms) {
-					continue
-				}
-				destination, _ := skillDestination(paths, destinationTarget, projection.Skill)
-				newReceipt.Projections = append(newReceipt.Projections, ReceiptProjection{Catalog: loaded.Manifest.ID, Skill: projection.Skill, Target: destinationTarget, Source: loaded.Sources[projection.Skill], Destination: destination, Strategy: "symlink", AppliedAt: now, TerranBuildVersion: buildVersion})
 			}
 		}
 		for _, old := range receipt.Managed {
@@ -727,73 +745,84 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				newReceipt.Managed = append(newReceipt.Managed, old)
 			}
 		}
-		for _, instruction := range loaded.Manifest.Instructions {
-			if !selectedInstruction(target, instruction.Target) || untouched("instruction", instruction.Target, "", instruction.Platforms) {
-				continue
+		for _, loaded := range catalogs.list() {
+			for _, projection := range loaded.Manifest.Projections {
+				for _, destinationTarget := range projection.Targets {
+					if !selectedSkill(target, destinationTarget) || untouched("skill", destinationTarget, projection.Skill, projection.Platforms) {
+						continue
+					}
+					destination, _ := skillDestination(paths, destinationTarget, projection.Skill)
+					newReceipt.Projections = append(newReceipt.Projections, ReceiptProjection{Catalog: loaded.Manifest.ID, Skill: projection.Skill, Target: destinationTarget, Source: loaded.Sources[projection.Skill], Destination: destination, Strategy: "symlink", AppliedAt: now, TerranBuildVersion: buildVersion})
+				}
 			}
-			if actionFor(result, "instruction", instruction.Target).Action == "skip" {
-				continue
-			}
-			prior, owned := ownedInstructions[instruction.Target]
-			origin := "created"
-			var originalHash, backup string
-			var originalMode uint32
-			if owned {
-				origin, originalHash, originalMode, backup = prior.Origin, prior.OriginalHash, prior.OriginalMode, prior.Backup
-			} else if action := actionFor(result, "instruction", instruction.Target); action.Action == "adopt" {
-				origin = "adopted"
+			for _, instruction := range loaded.Manifest.Instructions {
+				if !selectedInstruction(target, instruction.Target) || untouched("instruction", instruction.Target, "", instruction.Platforms) {
+					continue
+				}
+				if actionFor(result, "instruction", instruction.Target).Action == "skip" {
+					continue
+				}
+				prior, owned := ownedInstructions[instruction.Target]
+				origin := "created"
+				var originalHash, backup string
+				var originalMode uint32
+				if owned {
+					origin, originalHash, originalMode, backup = prior.Origin, prior.OriginalHash, prior.OriginalMode, prior.Backup
+				} else if action := actionFor(result, "instruction", instruction.Target); action.Action == "adopt" {
+					origin = "adopted"
+					destination, _ := instructionDestination(paths, instruction.Target)
+					info, _ := os.Stat(destination)
+					originalHash = loaded.InstructionHashes[instruction.Target]
+					originalMode = uint32(info.Mode().Perm())
+					backup = instructionBackup(paths, instruction.Target)
+				} else if action.Action == "replace" {
+					state := resolved[managedActionKey(action)]
+					origin = "adopted"
+					originalHash = state.originalHash
+					originalMode = uint32(state.originalMode.Perm())
+					backup = state.backup
+				}
 				destination, _ := instructionDestination(paths, instruction.Target)
-				info, _ := os.Stat(destination)
-				originalHash = loaded.InstructionHashes[instruction.Target]
-				originalMode = uint32(info.Mode().Perm())
-				backup = instructionBackup(paths, instruction.Target)
-			} else if action.Action == "replace" {
-				state := resolved[managedActionKey(action)]
-				origin = "adopted"
-				originalHash = state.originalHash
-				originalMode = uint32(state.originalMode.Perm())
-				backup = state.backup
+				sourceHash := verifiedInstructionHashes[instruction.Target]
+				if sourceHash == "" {
+					sourceHash = loaded.InstructionHashes[instruction.Target]
+				}
+				newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: "instruction", Catalog: loaded.Manifest.ID, Target: instruction.Target, Source: loaded.InstructionSources[instruction.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
 			}
-			destination, _ := instructionDestination(paths, instruction.Target)
-			sourceHash := verifiedInstructionHashes[instruction.Target]
-			if sourceHash == "" {
-				sourceHash = loaded.InstructionHashes[instruction.Target]
-			}
-			newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: "instruction", Catalog: loaded.Manifest.ID, Target: instruction.Target, Source: loaded.InstructionSources[instruction.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
-		}
-		for _, config := range loaded.Manifest.Configs {
-			if !selectedConfig(target, config.Target) || untouched("config", config.Target, "", config.Platforms) {
-				continue
-			}
-			if actionFor(result, "config", config.Target).Action == "skip" {
-				continue
-			}
-			prior, owned := ownedInstructions[config.Target]
-			origin := "created"
-			var originalHash, backup string
-			var originalMode uint32
-			if owned {
-				origin, originalHash, originalMode, backup = prior.Origin, prior.OriginalHash, prior.OriginalMode, prior.Backup
-			} else if action := actionFor(result, "config", config.Target); action.Action == "adopt" {
-				origin = "adopted"
+			for _, config := range loaded.Manifest.Configs {
+				if !selectedConfig(target, config.Target) || untouched("config", config.Target, "", config.Platforms) {
+					continue
+				}
+				if actionFor(result, "config", config.Target).Action == "skip" {
+					continue
+				}
+				prior, owned := ownedInstructions[config.Target]
+				origin := "created"
+				var originalHash, backup string
+				var originalMode uint32
+				if owned {
+					origin, originalHash, originalMode, backup = prior.Origin, prior.OriginalHash, prior.OriginalMode, prior.Backup
+				} else if action := actionFor(result, "config", config.Target); action.Action == "adopt" {
+					origin = "adopted"
+					destination, _ := configDestination(paths, config.Target)
+					info, _ := os.Stat(destination)
+					originalHash = loaded.ConfigHashes[config.Target]
+					originalMode = uint32(info.Mode().Perm())
+					backup = instructionBackup(paths, config.Target)
+				} else if action.Action == "replace" {
+					state := resolved[managedActionKey(action)]
+					origin = "adopted"
+					originalHash = state.originalHash
+					originalMode = uint32(state.originalMode.Perm())
+					backup = state.backup
+				}
 				destination, _ := configDestination(paths, config.Target)
-				info, _ := os.Stat(destination)
-				originalHash = loaded.ConfigHashes[config.Target]
-				originalMode = uint32(info.Mode().Perm())
-				backup = instructionBackup(paths, config.Target)
-			} else if action.Action == "replace" {
-				state := resolved[managedActionKey(action)]
-				origin = "adopted"
-				originalHash = state.originalHash
-				originalMode = uint32(state.originalMode.Perm())
-				backup = state.backup
+				sourceHash := verifiedInstructionHashes[config.Target]
+				if sourceHash == "" {
+					sourceHash = loaded.ConfigHashes[config.Target]
+				}
+				newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: "config", Catalog: loaded.Manifest.ID, Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
 			}
-			destination, _ := configDestination(paths, config.Target)
-			sourceHash := verifiedInstructionHashes[config.Target]
-			if sourceHash == "" {
-				sourceHash = loaded.ConfigHashes[config.Target]
-			}
-			newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: "config", Catalog: loaded.Manifest.ID, Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
 		}
 		sort.Slice(newReceipt.Projections, func(i, j int) bool {
 			return pairKey(newReceipt.Projections[i].Skill, newReceipt.Projections[i].Target) < pairKey(newReceipt.Projections[j].Skill, newReceipt.Projections[j].Target)
@@ -867,12 +896,13 @@ func CanResolveCollision(action Action) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	loaded, err := LoadManifest(enrollment.RepositoryPath)
+	catalogs, err := LoadCatalogs(enrollment)
 	if err != nil {
 		return false, err
 	}
-	if loaded.Manifest.ID != enrollment.RepositoryID {
-		return false, Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("enrolled repository id changed"))
+	loaded, err := catalogs.catalog(action.Catalog)
+	if err != nil {
+		return false, err
 	}
 	_, eligible := resolvableCollision(paths, loaded, action)
 	return eligible, nil
@@ -1050,12 +1080,17 @@ func preflightResolvedCollision(paths Paths, loaded LoadedManifest, action Actio
 	return nil
 }
 
-func preflightAction(paths Paths, loaded LoadedManifest, action Action, ownedSkills map[string]ReceiptProjection, ownedInstructions map[string]ReceiptManaged, resolved map[string]resolvedCollision) error {
+func preflightAction(paths Paths, catalogs Catalogs, action Action, ownedSkills map[string]ReceiptProjection, ownedInstructions map[string]ReceiptManaged, resolved map[string]resolvedCollision) error {
 	if inert(action) {
 		return nil
 	}
-	if err := revalidateLoadedManifest(loaded); err != nil {
+	if err := revalidateCatalogs(catalogs); err != nil {
 		return fmt.Errorf("revalidate catalog before %s: %w", action.Target, err)
+	}
+	// Sources are verified against the repository of the item's own catalog.
+	loaded, err := catalogs.catalog(action.Catalog)
+	if err != nil {
+		return err
 	}
 	if action.Kind == "skill" {
 		if source, desired := loaded.Sources[action.Skill]; desired && source == action.Source {
@@ -1161,11 +1196,11 @@ func rollbackSkills(rollbacks []skillRollback) error {
 	return errors.Join(rollbackErrs...)
 }
 
-func mutateSkill(paths Paths, loaded LoadedManifest, action Action, owned map[string]ReceiptProjection) error {
+func mutateSkill(paths Paths, catalogs Catalogs, action Action, owned map[string]ReceiptProjection) error {
 	if action.Action == "noop" || action.Action == "record" || action.Action == "adopt" {
 		return nil
 	}
-	if err := revalidateLoadedManifest(loaded); err != nil {
+	if err := revalidateCatalogs(catalogs); err != nil {
 		return err
 	}
 	switch action.Action {

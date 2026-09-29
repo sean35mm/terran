@@ -87,7 +87,7 @@ func runWithIO(args []string, stdout, stderr io.Writer) int {
 		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || options.repo == "" {
 			return flagError(stdout, stderr, err, jsonRequested(args[1:]))
 		}
-		enrollment, changed, err := terran.Enroll(options.repo, options.name, options.replace)
+		enrollment, changed, err := terran.Enroll(options.repo, options.name, options.overlay, options.replace)
 		if err != nil {
 			if options.json {
 				return jsonOperational(stdout, stderr, "enrollment failed", err)
@@ -104,6 +104,9 @@ func runWithIO(args []string, stdout, stderr io.Writer) int {
 			}
 		} else if changed {
 			fmt.Fprintf(stdout, "Enrolled %s at %s as %s.\n", enrollment.RepositoryID, enrollment.RepositoryPath, enrollment.DisplayName)
+			if enrollment.OverlayID != "" {
+				fmt.Fprintf(stdout, "Overlay %s at %s.\n", enrollment.OverlayID, enrollment.OverlayPath)
+			}
 		} else {
 			fmt.Fprintf(stdout, "Already enrolled %s at %s.\n", enrollment.RepositoryID, enrollment.RepositoryPath)
 		}
@@ -270,6 +273,7 @@ func runHoldCommand(command string, args []string, stdout, stderr io.Writer) int
 type commandOptions struct {
 	repo    string
 	name    string
+	overlay string
 	target  string
 	replace bool
 	json    bool
@@ -282,8 +286,9 @@ func newFlags(name string, output io.Writer) (*flag.FlagSet, *commandOptions) {
 	switch name {
 	case "enroll":
 		fs.StringVar(&options.repo, "repo", "", "absolute path to the local catalog repository (required)")
-		fs.StringVar(&options.name, "name", "", "Command Center display name (default: hostname)")
-		fs.BoolVar(&options.replace, "replace", false, "replace a different existing enrollment")
+		fs.StringVar(&options.name, "name", "", "Command Center display name (default: hostname; kept when re-enrolling)")
+		fs.StringVar(&options.overlay, "overlay", "", "absolute path to a private overlay catalog that only adds items (default: keep the enrolled overlay)")
+		fs.BoolVar(&options.replace, "replace", false, "replace a different existing enrollment; with the same repository, drop an overlay not given by --overlay")
 	case "plan", "apply", "status":
 		fs.StringVar(&options.target, "target", "all", "projection target: all, "+strings.Join(terran.TargetGroups(), ", "))
 	}
@@ -402,7 +407,7 @@ func printCommandIntro(w io.Writer, command string) {
 	targets := "all|" + strings.Join(terran.TargetGroups(), "|")
 	lines := map[string]string{
 		"version": "Usage: terran version [--json]\nRead-only. Prints build metadata. Exit: 0 success, 1 output failure, 2 usage.\n\nFlags:",
-		"enroll":  "Usage: terran enroll --repo PATH [--name NAME] [--replace] [--json]\nMutates private enrollment state; it never creates skill links, instruction files, or config files. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
+		"enroll":  "Usage: terran enroll --repo PATH [--name NAME] [--overlay PATH] [--replace] [--json]\nMutates private enrollment state; it never creates skill links, instruction files, or config files. Re-enrolling the same repository may rename it or add an overlay and keeps holds. Changing or dropping an overlay that still owns applied items fails with repository_mismatch. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
 		"plan":    "Usage: terran plan [--target " + targets + "] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"apply":   "Usage: terran apply [--target " + targets + "] [--json]\nMutates only validated skill leaves, fixed instruction/config files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"status":  "Usage: terran status [--target " + targets + "] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",

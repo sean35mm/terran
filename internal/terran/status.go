@@ -95,13 +95,15 @@ func Doctor(buildVersion string) DoctorResult {
 			add("state_permissions", "ok", file+" is a trusted mode-0600 state file")
 		}
 	}
-	loaded, err := LoadManifest(enrollment.RepositoryPath)
+	catalogs, err := LoadCatalogs(enrollment)
 	if err != nil {
 		add("manifest", "fail", err.Error())
-	} else if loaded.Manifest.ID != enrollment.RepositoryID {
-		add("manifest", "fail", "repository id differs from enrollment")
 	} else {
+		loaded := catalogs.Primary
 		add("manifest", "ok", loaded.Manifest.Version+" "+loaded.Fingerprint)
+		if catalogs.Overlay != nil {
+			add("overlay", "ok", catalogs.Overlay.Manifest.ID+" "+catalogs.Overlay.Manifest.Version+" at "+catalogs.Overlay.Repository)
+		}
 		if buildVersion != loaded.Manifest.Version && !strings.HasPrefix(buildVersion, loaded.Manifest.Version+"-") {
 			add("binary_version", "warn", "binary "+buildVersion+" differs from catalog "+loaded.Manifest.Version)
 		} else {
@@ -125,7 +127,7 @@ func Doctor(buildVersion string) DoctorResult {
 			add("target_"+target, "ok", root+" is a trusted real directory")
 		}
 	}
-	if receipt, err := LoadReceipt(paths); errors.Is(err, os.ErrNotExist) {
+	if receipt, err := LoadReceipt(paths, enrollment); errors.Is(err, os.ErrNotExist) {
 		add("instruction_receipt", "warn", "no instruction receipt exists yet")
 		add("config_receipt", "warn", "no config receipt exists yet")
 	} else if err != nil {
@@ -178,7 +180,7 @@ func Doctor(buildVersion string) DoctorResult {
 func doctorManagedFile(paths Paths, enrollment Enrollment, kind string, managed ReceiptManaged, add func(string, string, string)) bool {
 	name := kind + "_" + managed.Target
 	destination, destinationErr := managedFileDestination(paths, kind, managed.Target)
-	if destinationErr != nil || destination != managed.Destination || contained(enrollment.RepositoryPath, destination) {
+	if destinationErr != nil || destination != managed.Destination || contained(enrollment.RepositoryPath, destination) || (enrollment.OverlayPath != "" && contained(enrollment.OverlayPath, destination)) {
 		add(name, "fail", "fixed "+kind+" destination is invalid")
 		return false
 	}
