@@ -1322,3 +1322,31 @@ func TestApplyRevalidatesOverlayCatalog(t *testing.T) {
 		t.Fatalf("receipt written after overlay change: %v", err)
 	}
 }
+
+// TestRepositoryCatalogLoads guards the shipped catalog: LoadManifest checks
+// every skill's frontmatter name against its projection, and every skill
+// directory must be declared.
+func TestRepositoryCatalogLoads(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if _, ok := loaded.Sources[entry.Name()]; entry.IsDir() && !ok {
+			t.Errorf("skills/%s is not declared in terran.json", entry.Name())
+		}
+	}
+	for skill := range loaded.Sources {
+		if _, err := os.Stat(filepath.Join(root, "skills", skill, "SKILL.md")); err != nil {
+			t.Errorf("declared skill %s: %v", skill, err)
+		}
+	}
+}

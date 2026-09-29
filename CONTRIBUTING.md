@@ -13,7 +13,10 @@ mkdir -p tmp
 go build -o tmp/terran-build-check ./cmd/terran
 sh -n install.sh
 sh tests/install_leaf.sh
+python3 scripts/validate-docs.py
 ```
+
+Terran is used by AI agents and never prompts; keep every command scriptable with `--json` and flag-based decisions. Tests must use temporary `HOME`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` roots only. Skills under `skills/` are declared in `terran.json`, and the repository catalog must keep loading (the test suite checks it).
 
 Update `CHANGELOG.md`, documentation, licenses, and third-party notices when applicable. Canonical global policies under `instructions/` are complete harness-specific files, not repository guidance; review authorization behavior and portability before changing them. Never include credentials, private machine state, generated binaries, email addresses, local URLs, or personal absolute paths. Contributions are accepted under the repository's MIT License unless a file states another license.
 

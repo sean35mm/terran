@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self' https://static.wikia.nocookie.net; script-src 'none'; font-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Terran safely projects a reviewed local catalog of skills, global instructions, and OpenCode configuration into AI coding harnesses.">
+  <meta name="description" content="Terran lets your AI agent safely project a reviewed local catalog of skills, instructions, and configuration onto every machine you use.">
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="index,follow">
   <link rel="canonical" href="https://sean35mm.github.io/terran/">
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/site.css">
-  <title>Terran — Project a trusted AI coding catalog</title>
+  <title>Terran — Let your agent set up your machines from a trusted catalog</title>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -23,15 +23,15 @@
 
   <main id="main" class="shell">
     <nav class="contents" aria-label="Contents">
-      <a href="#install">install</a>
+      <a href="#install">get started</a>
       <a href="#workflow">workflow</a>
       <a href="#collisions">collisions</a>
       <a href="#reference">reference</a>
     </nav>
 
     <section class="hero" aria-labelledby="hero-title">
-      <h1 id="hero-title">Project a trusted local catalog. See every change first.</h1>
-      <p class="lede">Terran is a dependency-free Go CLI that places curated skills, global instructions, and OpenCode configuration at fixed harness destinations. It plans before changing anything, blocks unsafe collisions and drift, and records what it owns.</p>
+      <h1 id="hero-title">Your agent sets up your machines. You approve every change.</h1>
+      <p class="lede">Terran is a dependency-free Go CLI that AI agents use to place curated skills, instructions, configs, and tool lists at fixed harness destinations. It plans before changing anything, blocks unsafe collisions and drift, and records what it owns. It never prompts: your agent asks you, then passes your decision.</p>
       <figure class="command-center">
         <img src="https://static.wikia.nocookie.net/starcraft/images/d/dc/CommandCenter_SCR_Game1.png/revision/latest?cb=20220108145341" alt="StarCraft: Remastered Terran Command Center" width="511" height="402" loading="eager" decoding="async" referrerpolicy="no-referrer">
         <figcaption><a href="https://static.wikia.nocookie.net/starcraft/images/d/dc/CommandCenter_SCR_Game1.png/revision/latest?cb=20220108145341" rel="noreferrer">StarCraft: Remastered Command Center image</a>. Image and StarCraft are © Blizzard Entertainment. Terran is unaffiliated.</figcaption>
@@ -39,32 +39,22 @@
     </section>
 
     <section id="install" aria-labelledby="install-title">
-      <h2 id="install-title">Install</h2>
-      <p>Use an exact release, inspect the installer, and verify the published checksum before installing.</p>
-      <pre aria-label="Install Terran and start the guided workflow"><code>less install.sh
-sh install.sh v0.3.0
-terran</code></pre>
-      <p>Running bare <code>terran</code> in a human terminal guides catalog enrollment, plan review, apply, and verification. Enrollment trusts one user-chosen local catalog; Terran does not search, clone, or fetch one.</p>
-      <p>For a source build, use Go 1.24 or newer from an exact reviewed commit and run the repository tests first. Release checksums detect corruption or mismatch, but do not replace source and publisher review.</p>
+      <h2 id="install-title">Get started</h2>
+      <p>Install your AI coding agent (Claude Code, Codex, or OpenCode), open it on the machine, and tell it:</p>
+      <pre aria-label="Prompt for your agent"><code>Set this machine up as a Terran Command Center.</code></pre>
+      <p>Give it the catalog you trust and, if you keep one, your private overlay. The agent follows the <a href="https://github.com/sean35mm/terran/blob/main/README.md#agent-guide">agent guide in the README</a>: it installs Terran from a pinned release, shows you a plan, and asks before every install, replacement, and login. It never pushes to git; you do.</p>
+      <p>Terran itself is installed from an exact release after inspecting <code>install.sh</code>, or built from a reviewed commit with Go 1.24 or newer. Release checksums detect corruption or mismatch, but do not replace source and publisher review.</p>
     </section>
 
     <section id="workflow" aria-labelledby="workflow-title">
       <h2 id="workflow-title">Workflow</h2>
       <ol class="workflow">
-        <li><strong>Enroll.</strong> Inspect and trust one local catalog repository.</li>
-        <li><strong>Plan.</strong> Review every source, fixed destination, action, and reason.</li>
-        <li><strong>Apply.</strong> Terran holds its lock, asks for confirmation of the exact plan, revalidates, then performs eligible work.</li>
-        <li><strong>Verify.</strong> Terran writes a private receipt; use <code>status</code> and <code>doctor</code> to inspect managed state and wider installation health.</li>
+        <li><strong>Enroll.</strong> Your agent records one trusted local catalog and an optional private overlay, and names this Command Center.</li>
+        <li><strong>Plan.</strong> Every source, fixed destination, action, and reason is shown to you, with a digest.</li>
+        <li><strong>Apply.</strong> After your approval, Terran holds its lock, checks the digest, revalidates, then performs eligible work.</li>
+        <li><strong>Verify.</strong> Terran writes a private receipt; <code>status</code> and <code>doctor</code> report managed state, wider installation health, and every machine in your fleet.</li>
       </ol>
-      <p>The default catalog manages 10 skill projections, two complete global instruction copies, an OpenCode configuration copy, and a Naru runtime configuration copy. Skills remain live links to the enrolled checkout. Copied files change only through <code>terran apply</code>.</p>
-
-      <h3>Advanced and noninteractive use</h3>
-      <p>Bare non-TTY use prints help and never mutates. Deterministic commands and JSON output are available for advanced use:</p>
-      <pre aria-label="Advanced Terran commands"><code>terran enroll --repo PATH --name NAME
-terran plan --json
-terran apply --json
-terran status --json
-terran doctor --json</code></pre>
+      <p>A catalog can manage skills (live links), complete instruction files, config files, named agent, command, and hook files, owned keys in shared settings files, and a list of required tools. Items can be tagged for macOS or Linux only. Copied files change only through <code>terran apply</code>.</p>
     </section>
 
     <section id="collisions" aria-labelledby="collisions-title">
@@ -72,22 +62,23 @@ terran doctor --json</code></pre>
       <p>Terran never clears unrelated content to make a plan clean.</p>
       <dl class="collision-list">
         <dt>missing</dt>
-        <dd>Create after review and confirmation.</dd>
-        <dt>exact safe file</dt>
+        <dd>Create after your approval.</dd>
+        <dt>exact safe match</dt>
         <dd>Adopt it without changing the active file and retain a validated private backup.</dd>
-        <dt>safe differing instruction or config</dt>
-        <dd>Interactive apply offers replace with backup, keep it unowned, or quit. Empty input and EOF quit.</dd>
+        <dt>safe differing item</dt>
+        <dd>Blocked until you choose, per item, to replace it (with a private backup) or keep it (held on this machine).</dd>
         <dt>unsafe collision or receipt-owned drift</dt>
-        <dd>Stop. Skills, unsafe file types or metadata, changed managed content, and changed backups are not overwritten.</dd>
+        <dd>Stop. Unsafe file types or metadata, changed managed content, and changed backups are not overwritten.</dd>
       </dl>
-      <p><code>doctor</code> validates the full receipt, active managed inventory, and every adoption backup. Terran validates ownership, modes, links, boundaries, hashes, and fixed targets; it does not manage secrets, install other tools, or sandbox a malicious process running as the same user.</p>
+      <p><code>doctor</code> validates the full receipt, active managed inventory, every adoption backup, and required tools. Terran validates ownership, modes, links, boundaries, hashes, and fixed targets; it does not manage secrets, install other tools itself, or sandbox a malicious process running as the same user. Fleet status runs a fixed, read-only <code>ssh</code> command and returns only names, counts, versions, and commits.</p>
     </section>
 
     <section id="reference" aria-labelledby="reference-title">
       <h2 id="reference-title">Reference</h2>
       <ul class="links">
+        <li><a href="https://github.com/sean35mm/terran/blob/main/README.md#agent-guide">agent guide</a></li>
         <li><a href="https://github.com/sean35mm/terran/blob/main/README.md">documentation</a></li>
-        <li><a href="https://github.com/sean35mm/terran/releases/tag/v0.3.0">v0.3.0 release and checksums</a></li>
+        <li><a href="https://github.com/sean35mm/terran/releases/tag/v0.4.0">v0.4.0 release and checksums</a></li>
         <li><a href="https://github.com/sean35mm/terran/blob/main/SECURITY.md">security policy</a></li>
       </ul>
       <p class="disclaimer">Terran is an independent project and is not affiliated with or endorsed by Blizzard Entertainment. StarCraft and related marks belong to their respective owners.</p>

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "terran-default",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "configs": [
     {
       "target": "opencode-config",
@@ -39,8 +39,8 @@
       "targets": ["agents", "claude"]
     },
     {
-      "skill": "terran-enroll",
-      "source": "skills/terran-enroll",
+      "skill": "terran-provision",
+      "source": "skills/terran-provision",
       "targets": ["agents", "claude"]
     },
     {
