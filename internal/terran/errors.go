@@ -12,6 +12,7 @@ const (
 	CodePlanChanged        = "plan_changed"
 	CodeOverlayUnavailable = "overlay_unavailable"
 	CodeUnknownItem        = "unknown_item"
+	CodeUnreachable        = "unreachable"
 	CodeUsage              = "usage"
 )
 

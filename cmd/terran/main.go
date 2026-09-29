@@ -36,8 +36,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func runWithIO(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printHelp(stdout)
-		return 0
+		return runBareCommand(stdout, stderr)
 	}
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		printHelp(stdout)
@@ -111,7 +110,9 @@ func runWithIO(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "Already enrolled %s at %s.\n", enrollment.RepositoryID, enrollment.RepositoryPath)
 		}
 		return 0
-	case "plan", "apply", "status":
+	case "status":
+		return runStatusCommand(args[1:], stdout, stderr)
+	case "plan", "apply":
 		return runProjectionCommand(args[0], args[1:], stdout, stderr)
 	case "capture":
 		return runCaptureCommand(args[1:], stdout, stderr)
@@ -156,35 +157,6 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 	}
 	if err := terran.ValidateTarget(options.target); err != nil {
 		return usage(stdout, stderr, err.Error(), options.json)
-	}
-	if command == "status" {
-		result, err := terran.Status(options.target)
-		if err != nil {
-			if options.json {
-				return jsonOperational(stdout, stderr, "status failed", err)
-			}
-			return operational(stderr, err)
-		}
-		if options.json {
-			if err := writeJSON(stdout, result); err != nil {
-				return operational(stderr, fmt.Errorf("write output: %w", err))
-			}
-		} else {
-			for _, item := range result.Items {
-				name := item.Skill
-				if name == "" {
-					name = item.Name
-				}
-				if name == "" {
-					name = item.Target
-				}
-				fmt.Fprintf(stdout, "%-10s %-11s %-16s %s\n", item.Status, item.Kind, item.Target, name)
-			}
-		}
-		if !result.Clean {
-			return 1
-		}
-		return 0
 	}
 	var result terran.PlanResult
 	var err error
@@ -231,6 +203,45 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 		}
 	}
 	return 0
+}
+
+func runLocalStatus(options *commandOptions, stdout, stderr io.Writer) int {
+	result, err := terran.Status(options.target)
+	if err != nil {
+		return statusFailed(options.json, stdout, stderr, err)
+	}
+	if options.json {
+		if err := writeJSON(stdout, result); err != nil {
+			return operational(stderr, fmt.Errorf("write output: %w", err))
+		}
+	} else {
+		for _, item := range result.Items {
+			name := item.Skill
+			if name == "" {
+				name = item.Name
+			}
+			if name == "" {
+				name = item.Target
+			}
+			fmt.Fprintf(stdout, "%-10s %-11s %-16s %s\n", item.Status, item.Kind, item.Target, name)
+		}
+	}
+	if !result.Clean {
+		return 1
+	}
+	return 0
+}
+
+// runBareCommand shows the fleet table, or help on a machine that is not enrolled yet.
+func runBareCommand(stdout, stderr io.Writer) int {
+	paths, err := terran.ResolvePaths()
+	if err == nil {
+		if missing, err := terran.EnrollmentMissing(paths); err == nil && missing {
+			printHelp(stdout)
+			return 0
+		}
+	}
+	return runFleetStatus(false, stdout, stderr)
 }
 
 func runCaptureCommand(args []string, stdout, stderr io.Writer) int {
@@ -322,6 +333,8 @@ type commandOptions struct {
 	target  string
 	replace bool
 	json    bool
+	local   bool
+	summary bool
 
 	decisions map[string]terran.CollisionDecision
 	expect    string
@@ -339,6 +352,10 @@ func newFlags(name string, output io.Writer) (*flag.FlagSet, *commandOptions) {
 		fs.BoolVar(&options.replace, "replace", false, "replace a different existing enrollment; with the same repository, drop an overlay not given by --overlay")
 	case "plan", "apply", "status", "capture":
 		fs.StringVar(&options.target, "target", "all", "projection target: all, "+strings.Join(terran.TargetGroups(), ", "))
+	}
+	if name == "status" {
+		fs.BoolVar(&options.local, "local", false, "show item-level status for this machine only (supports --target)")
+		fs.BoolVar(&options.summary, "summary", false, "emit this machine's one-line fleet summary as JSON (used over ssh)")
 	}
 	if name == "apply" {
 		fs.Func("decide", "resolve a blocked_collision item: ITEM_ID=replace|keep (repeatable); replace backs up the existing value and installs the catalog version, keep holds the item", func(value string) error {
@@ -446,7 +463,8 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, `Terran manages local skills, global instructions, and fixed global configs on a Command Center.
 
 Start here:
-  terran                  Show this help
+  terran                  Show the fleet table (help when not enrolled)
+  terran --help           Show this help
   terran doctor           Diagnose enrollment and managed state
   terran help             Show this help or help for one command
 
@@ -454,7 +472,7 @@ Advanced and automation:
   terran enroll           Record a trusted local catalog
   terran plan             Inspect proposed changes without mutation
   terran apply            Apply an explicitly selected, validated plan
-  terran status           Inspect low-level managed state
+  terran status           Fleet table; --local for this machine's item-level state
   terran capture          List unmanaged agent setup on this machine
   terran hold             Pin one item on this machine so apply leaves it alone
   terran unhold           Release a held item
@@ -476,7 +494,7 @@ func printCommandIntro(w io.Writer, command string) {
 		"enroll":  "Usage: terran enroll --repo PATH [--name NAME] [--overlay PATH] [--replace] [--json]\nMutates private enrollment state; it never creates skill links, instruction files, or config files. Re-enrolling the same repository may rename it or add an overlay and keeps holds. Changing or dropping an overlay that still owns applied items fails with repository_mismatch. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
 		"plan":    "Usage: terran plan [--target " + targets + "] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"apply":   "Usage: terran apply [--target " + targets + "] [--decide ITEM_ID=replace|keep]... [--expect DIGEST] [--json]\nUndecided collisions block (exit 3). A --decide for an item that is not a blocked_collision is a usage error and nothing is changed; a stale --expect fails with plan_changed. Mutates only validated skill leaves, fixed instruction/config files, named files in fixed directories, owned top-level keys in fixed JSON settings files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
-		"status":  "Usage: terran status [--target " + targets + "] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
+		"status":  "Usage: terran status [--json]\n       terran status NAME [--json]\n       terran status --local [--target " + targets + "] [--json]\n       terran status --summary --json\nRead-only. Without arguments, prints one row per Command Center in the overlay's command-centers.json (this machine plus each ssh alias, queried as ~/.local/bin/terran); unreachable machines are rows, not errors. NAME prints that machine's item-level status over ssh as the remote returned it (unreachable failures use error code unreachable). --local prints this machine's item-level status. Exit: fleet table and --summary 0 (1 operational failure), NAME and --local 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
 		"capture": "Usage: terran capture [--target " + targets + "] [--json]\nRead-only. Lists entries in skill and file directories, whole-file targets, and top-level settings keys that Terran does not own, as ITEM_ID KIND lines (values are never printed). Skips hidden, naru- prefixed, held, and already owned entries. Exit: 0 success, 1 operational failure (including not_enrolled), 2 usage.\n\nFlags:",
 		"hold":    "Usage: terran hold ITEM_ID [--json]\nMutates private enrollment state only. Pins an item id from terran plan --json so plan and apply never inspect or change it. Exit: 0 success, 1 operational failure (including unknown_item), 2 usage.\n\nFlags:",
 		"unhold":  "Usage: terran unhold ITEM_ID [--json]\nMutates private enrollment state only. Releases a held item; releasing an item that is not held succeeds. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",

@@ -27,7 +27,6 @@ func TestHelpVersionJSONAndUsage(t *testing.T) {
 		want string
 	}{
 		{[]string{"--help"}, 0, "Terran manages"},
-		{nil, 0, "Terran manages"},
 		{[]string{"help", "apply"}, 0, "Usage: terran apply"},
 		{[]string{"apply", "--help"}, 0, "Usage: terran apply"},
 		{[]string{"--version"}, 0, "0.1.0-test"},
@@ -51,6 +50,68 @@ func TestHelpVersionJSONAndUsage(t *testing.T) {
 	var value map[string]any
 	if err := json.Unmarshal(out.Bytes(), &value); err != nil || value["schema_version"] != float64(terran.SchemaVersion) || value["version"] != "0.1.0-test" {
 		t.Fatalf("invalid JSON: %s %v", out.String(), err)
+	}
+}
+
+func TestBareTerranShowsHelpWhenNotEnrolledAndFleetWhenEnrolled(t *testing.T) {
+	base := t.TempDir()
+	home, repo := filepath.Join(base, "home"), filepath.Join(base, "repo")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	_ = os.MkdirAll(home, 0o755)
+	var out, errOut bytes.Buffer
+	if code := run(nil, &out, &errOut); code != 0 || !strings.Contains(out.String(), "Terran manages") {
+		t.Fatalf("not enrolled: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	_ = os.MkdirAll(filepath.Join(repo, "skills", "example"), 0o755)
+	_ = os.WriteFile(filepath.Join(repo, "skills", "example", "SKILL.md"), []byte("---\nname: example\n---\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(repo, "terran.json"), []byte(`{"schema_version":1,"id":"test-catalog","version":"0.1.0","projections":[{"skill":"example","source":"skills/example","targets":["agents"]}]}`), 0o644)
+	if _, _, err := terran.Enroll(repo, "cc1", "", false); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := run(nil, &out, &errOut); code != 0 || !strings.HasPrefix(out.String(), "CC    PLATFORM") || !strings.Contains(out.String(), "cc1*") {
+		t.Fatalf("enrolled: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, args := range [][]string{{"status", "--summary", "--local"}, {"status", "--target", "agents"}, {"status", "--local", "cc2"}, {"status", "a", "b"}, {"status", "nope"}} {
+		out.Reset()
+		errOut.Reset()
+		if code := run(args, &out, &errOut); code != 2 {
+			t.Fatalf("%v: code=%d stdout=%q stderr=%q", args, code, out.String(), errOut.String())
+		}
+	}
+	out.Reset()
+	if code := run([]string{"status", "--summary", "--json"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), `"local":true`) {
+		t.Fatalf("summary: code=%d stdout=%q", code, out.String())
+	}
+	out.Reset()
+	if code := run([]string{"status", "--local", "--target", "agents", "--json"}, &out, &errOut); code != 1 || !strings.Contains(out.String(), `"items"`) {
+		t.Fatalf("local: code=%d stdout=%q", code, out.String())
+	}
+}
+
+func TestFleetTableRendersMixedRows(t *testing.T) {
+	rows := []terran.MachineSummary{
+		{Name: "cc1", Platform: "darwin", Local: true, Reachable: true, TerranVersion: "0.4.0", CatalogCommit: "5aeb5d4", OverlayCommit: "1c2d3e4", Clean: true, Healthy: true, Held: 5},
+		{Name: "cc2", Platform: "linux", Reachable: true, TerranVersion: "0.4.0", CatalogCommit: "5aeb5d4", OverlayCommit: "1c2d3e4", Drifted: 2},
+		{Name: "cc3", Platform: "linux", Error: "offline"},
+		{Name: "cc4", Platform: "linux", Reachable: true, TerranVersion: "0.4.0", Blocked: 1, Drifted: 1},
+		{Name: "cc5", Platform: "linux", Reachable: true, TerranVersion: "0.4.0", Clean: true},
+	}
+	var out bytes.Buffer
+	if err := writeFleetTable(&out, rows); err != nil {
+		t.Fatal(err)
+	}
+	want := "CC    PLATFORM  TERRAN  CATALOG  OVERLAY  STATE\n" +
+		"cc1*  darwin    0.4.0   5aeb5d4  1c2d3e4  clean (5 held)\n" +
+		"cc2   linux     0.4.0   5aeb5d4  1c2d3e4  drift: 2\n" +
+		"cc3   linux     -       -        -        offline\n" +
+		"cc4   linux     0.4.0   -        -        blocked: 1\n" +
+		"cc5   linux     0.4.0   -        -        unhealthy\n"
+	if out.String() != want {
+		t.Fatalf("table:\n%s\nwant:\n%s", out.String(), want)
 	}
 }
 
