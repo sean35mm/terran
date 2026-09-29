@@ -70,13 +70,8 @@ func TestInteractiveReplacementAdoptsAndRestoresInstructionAndConfig(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			var managed ReceiptInstruction
-			if tc.kind == "config" {
-				managed = ReceiptInstruction(receipt.Configs[0])
-			} else {
-				managed = receipt.Instructions[0]
-			}
-			if managed.Origin != "adopted" || managed.OriginalHash != hashBytes(original) || managed.OriginalMode != 0o640 || managed.Backup != backup {
+			managed := receipt.Managed[0]
+			if managed.Kind != tc.kind || managed.Origin != "adopted" || managed.OriginalHash != hashBytes(original) || managed.OriginalMode != 0o640 || managed.Backup != backup {
 				t.Fatalf("adopted metadata: %#v", managed)
 			}
 			tc.remove(t, repo)
@@ -123,7 +118,7 @@ func TestInteractiveSkipContinuesAndRemainsCollision(t *testing.T) {
 		t.Fatalf("other selected action did not apply: %v", err)
 	}
 	receipt, err := LoadReceipt(paths)
-	if err != nil || len(receipt.Instructions) != 1 || receipt.Instructions[0].Target != "opencode-global" {
+	if err != nil || len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "instruction" || receipt.Managed[0].Target != "opencode-global" {
 		t.Fatalf("skip gained ownership: %#v %v", receipt, err)
 	}
 	if plan, _ := Plan("all"); actionCount(plan, "blocked_collision") != 1 {

@@ -49,7 +49,7 @@ func TestHelpVersionJSONAndUsage(t *testing.T) {
 		t.Fatal(code, errOut.String())
 	}
 	var value map[string]any
-	if err := json.Unmarshal(out.Bytes(), &value); err != nil || value["schema_version"] != float64(1) || value["version"] != "0.1.0-test" {
+	if err := json.Unmarshal(out.Bytes(), &value); err != nil || value["schema_version"] != float64(terran.SchemaVersion) || value["version"] != "0.1.0-test" {
 		t.Fatalf("invalid JSON: %s %v", out.String(), err)
 	}
 }
@@ -174,7 +174,7 @@ func TestCLIJSONOperationalAndBlockedExitCodes(t *testing.T) {
 		t.Fatalf("blocked code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	var result map[string]any
-	if err := json.Unmarshal(out.Bytes(), &result); err != nil || result["schema_version"] != float64(1) {
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil || result["schema_version"] != float64(terran.SchemaVersion) {
 		t.Fatalf("blocked JSON invalid: %q %v", out.String(), err)
 	}
 	out.Reset()
@@ -324,7 +324,7 @@ func assertJSONError(t *testing.T, data []byte, code, message, next string) {
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		t.Fatalf("trailing JSON in %q: %v", data, err)
 	}
-	if result.SchemaVersion != 1 || result.Error.Code != code || result.Error.Message != message || result.Error.Next != next {
+	if result.SchemaVersion != terran.SchemaVersion || result.Error.Code != code || result.Error.Message != message || result.Error.Next != next {
 		t.Fatalf("unexpected JSON error: %#v", result)
 	}
 }

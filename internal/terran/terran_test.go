@@ -1,13 +1,16 @@
 package terran
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func testEnvironment(t *testing.T) (home, repo string) {
@@ -456,7 +459,7 @@ func TestPathSafetyAndEnrollment(t *testing.T) {
 		t.Fatalf("enroll: %v", err)
 	}
 	second, changed, err := Enroll(repo, "ignored new name", false)
-	if err != nil || changed || first != second {
+	if err != nil || changed || !reflect.DeepEqual(first, second) {
 		t.Fatalf("idempotent enroll failed: %v", err)
 	}
 	other := filepath.Join(t.TempDir(), "other")
@@ -750,6 +753,200 @@ func TestSkillReceiptDestinationMustMatchFixedLeaf(t *testing.T) {
 	doctor := Doctor("test")
 	if doctor.Healthy {
 		t.Fatal("doctor accepted a tampered skill destination")
+	}
+}
+
+func TestSchemaV1Upgrades(t *testing.T) {
+	timestamp := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	t.Run("manifest", func(t *testing.T) {
+		old := manifestV1{
+			SchemaVersion: 1,
+			ID:            "test-catalog",
+			Version:       "0.3.0",
+			Projections:   []projectionV1{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}}},
+			Instructions:  []instructionV1{{Target: "claude-global", Source: "instructions/CLAUDE.md"}},
+			Configs:       []configV1{{Target: "opencode-config", Source: "config/opencode.json"}},
+		}
+		data, _ := json.Marshal(old)
+		got, err := decodeManifest(data)
+		want := Manifest{
+			SchemaVersion: SchemaVersion,
+			ID:            old.ID,
+			Version:       old.Version,
+			Projections:   []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}}},
+			Instructions:  []Instruction{{Target: "claude-global", Source: "instructions/CLAUDE.md"}},
+			Configs:       []Config{{Target: "opencode-config", Source: "config/opencode.json"}},
+		}
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("manifest upgrade: got=%#v want=%#v err=%v", got, want, err)
+		}
+	})
+
+	t.Run("enrollment", func(t *testing.T) {
+		old := enrollmentV1{1, "test-catalog", "/catalog", "cc-test", "Test Center"}
+		data, _ := json.Marshal(old)
+		got, err := decodeEnrollment(data)
+		want := Enrollment{SchemaVersion: SchemaVersion, RepositoryID: old.RepositoryID, RepositoryPath: old.RepositoryPath, CommandCenterID: old.CommandCenterID, DisplayName: old.DisplayName}
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("enrollment upgrade: got=%#v want=%#v err=%v", got, want, err)
+		}
+	})
+
+	t.Run("receipt", func(t *testing.T) {
+		managed := receiptInstructionV1{
+			Target: "claude-global", Source: "/catalog/instructions/CLAUDE.md", Destination: "/home/.claude/CLAUDE.md", Strategy: "copy",
+			SourceHash: strings.Repeat("a", 64), AppliedHash: strings.Repeat("a", 64), Origin: "created", AppliedAt: timestamp, TerranBuildVersion: "0.3.0",
+		}
+		old := receiptV1{
+			SchemaVersion: 1, RepositoryID: "test-catalog", RepositoryPath: "/catalog", RepositoryVersion: "0.3.0", ManifestFingerprint: "fingerprint",
+			Projections:  []receiptProjectionV1{{Skill: "example", Target: "agents", Source: "/catalog/skills/example", Destination: "/home/.agents/skills/example", Strategy: "symlink", AppliedAt: timestamp, TerranBuildVersion: "0.3.0"}},
+			Instructions: []receiptInstructionV1{managed},
+			Configs:      []receiptConfigV1{receiptConfigV1(managed)},
+		}
+		old.Configs[0].Target = "opencode-config"
+		data, _ := json.Marshal(old)
+		got, err := decodeReceipt(data)
+		if err != nil || got.SchemaVersion != SchemaVersion || len(got.Projections) != 1 || got.Projections[0].Catalog != old.RepositoryID || len(got.Managed) != 2 {
+			t.Fatalf("receipt upgrade: %#v err=%v", got, err)
+		}
+		if got.Managed[0].Kind != "instruction" || got.Managed[1].Kind != "config" || got.Managed[0].Catalog != old.RepositoryID || got.Managed[1].Catalog != old.RepositoryID {
+			t.Fatalf("receipt managed upgrade: %#v", got.Managed)
+		}
+	})
+}
+
+func TestSchemaStrictVersionedDecoding(t *testing.T) {
+	tests := []struct {
+		name   string
+		decode func([]byte) error
+		data   string
+	}{
+		{"manifest v2 field under v1", func(data []byte) error { _, err := decodeManifest(data); return err }, `{"schema_version":1,"id":"x","version":"1","projections":[],"tools":[]}`},
+		{"enrollment v2 field under v1", func(data []byte) error { _, err := decodeEnrollment(data); return err }, `{"schema_version":1,"repository_id":"x","repository_path":"/x","command_center_id":"cc-x","display_name":"x","holds":[]}`},
+		{"receipt v2 field under v1", func(data []byte) error { _, err := decodeReceipt(data); return err }, `{"schema_version":1,"repository_id":"x","repository_path":"/x","repository_version":"1","manifest_fingerprint":"x","projections":[],"managed":[]}`},
+		{"manifest v1 unknown", func(data []byte) error { _, err := decodeManifest(data); return err }, `{"schema_version":1,"id":"x","version":"1","projections":[],"unknown":true}`},
+		{"manifest v2 unknown", func(data []byte) error { _, err := decodeManifest(data); return err }, `{"schema_version":2,"id":"x","version":"1","projections":[],"unknown":true}`},
+		{"enrollment v1 unknown", func(data []byte) error { _, err := decodeEnrollment(data); return err }, `{"schema_version":1,"unknown":true}`},
+		{"enrollment v2 unknown", func(data []byte) error { _, err := decodeEnrollment(data); return err }, `{"schema_version":2,"unknown":true}`},
+		{"receipt v1 unknown", func(data []byte) error { _, err := decodeReceipt(data); return err }, `{"schema_version":1,"unknown":true}`},
+		{"receipt v2 unknown", func(data []byte) error { _, err := decodeReceipt(data); return err }, `{"schema_version":2,"unknown":true}`},
+		{"manifest schema 3", func(data []byte) error { _, err := decodeManifest(data); return err }, `{"schema_version":3}`},
+		{"enrollment schema 3", func(data []byte) error { _, err := decodeEnrollment(data); return err }, `{"schema_version":3}`},
+		{"receipt schema 3", func(data []byte) error { _, err := decodeReceipt(data); return err }, `{"schema_version":3}`},
+		{"duplicate schema version", func(data []byte) error { _, err := decodeManifest(data); return err }, `{"schema_version":1,"schema_version":2}`},
+		{"trailing JSON", func(data []byte) error { _, err := decodeManifest(data); return err }, `{"schema_version":2}{}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.decode([]byte(tc.data)); err == nil {
+				t.Fatal("invalid versioned JSON accepted")
+			}
+		})
+	}
+}
+
+func TestSchemaV2FieldsRoundTrip(t *testing.T) {
+	manifest := Manifest{
+		SchemaVersion: SchemaVersion, ID: "catalog", Version: "1", Projections: []Projection{{Skill: "skill", Source: "skills/skill", Targets: []string{"agents"}, Platforms: []string{"darwin"}}},
+		Instructions: []Instruction{{Target: "claude-global", Source: "instructions/CLAUDE.md", Platforms: []string{"linux"}}},
+		Configs:      []Config{{Target: "opencode-config", Source: "config/opencode.json", Platforms: []string{"darwin", "linux"}}},
+		Files:        []FileItem{{Target: "future-file", Name: "worker.md", Source: "files/worker.md", Platforms: []string{"linux"}}},
+		JSONKeys:     []JSONKeysItem{{Target: "future-json", Source: "config/hooks.json", Platforms: []string{"darwin"}}},
+		Tools:        []Tool{{Name: "go", Platforms: []string{"darwin", "linux"}}},
+	}
+	enrollment := Enrollment{SchemaVersion: SchemaVersion, RepositoryID: "catalog", RepositoryPath: "/catalog", CommandCenterID: "cc-test", DisplayName: "test", OverlayID: "overlay", OverlayPath: "/overlay", Holds: []string{"skill/agents/skill"}}
+	receipt := Receipt{SchemaVersion: SchemaVersion, RepositoryID: "catalog", RepositoryPath: "/catalog", Projections: []ReceiptProjection{}, Managed: []ReceiptManaged{{Kind: "instruction", Catalog: "catalog", Target: "claude-global", Source: "/catalog/instructions/CLAUDE.md"}}}
+
+	manifestData, _ := json.Marshal(manifest)
+	gotManifest, manifestErr := decodeManifest(manifestData)
+	enrollmentData, _ := json.Marshal(enrollment)
+	gotEnrollment, enrollmentErr := decodeEnrollment(enrollmentData)
+	receiptData, _ := json.Marshal(receipt)
+	gotReceipt, receiptErr := decodeReceipt(receiptData)
+	if manifestErr != nil || !reflect.DeepEqual(gotManifest, manifest) || enrollmentErr != nil || !reflect.DeepEqual(gotEnrollment, enrollment) || receiptErr != nil || !reflect.DeepEqual(gotReceipt, receipt) {
+		t.Fatalf("v2 round trip failed: manifest=%v enrollment=%v receipt=%v", manifestErr, enrollmentErr, receiptErr)
+	}
+}
+
+func TestManifestV2FutureFieldValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Manifest)
+	}{
+		{"file target", func(manifest *Manifest) {
+			manifest.Files = []FileItem{{Target: "claude-agent", Name: "worker.md", Source: "files/worker.md"}}
+		}},
+		{"json-keys target", func(manifest *Manifest) {
+			manifest.JSONKeys = []JSONKeysItem{{Target: "claude-settings", Source: "config/hooks.json"}}
+		}},
+		{"invalid tool", func(manifest *Manifest) { manifest.Tools = []Tool{{Name: "Bad Tool"}} }},
+		{"empty platforms", func(manifest *Manifest) { manifest.Tools = []Tool{{Name: "go", Platforms: []string{"linux"}}} }},
+		{"duplicate platforms", func(manifest *Manifest) { manifest.Tools = []Tool{{Name: "go", Platforms: []string{"linux", "linux"}}} }},
+		{"unsupported platform", func(manifest *Manifest) { manifest.Tools = []Tool{{Name: "go", Platforms: []string{"windows"}}} }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, repo := testEnvironment(t)
+			loaded, err := LoadManifest(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest := loaded.Manifest
+			tc.mutate(&manifest)
+			data, _ := json.Marshal(manifest)
+			if tc.name == "empty platforms" {
+				data = bytes.Replace(data, []byte(`"platforms":["linux"]`), []byte(`"platforms":[]`), 1)
+			}
+			if err := os.WriteFile(filepath.Join(repo, "terran.json"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadManifest(repo); err == nil {
+				t.Fatal("invalid future manifest field accepted")
+			}
+		})
+	}
+
+	_, repo := testEnvironment(t)
+	loaded, err := LoadManifest(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := loaded.Manifest
+	manifest.Projections[0].Platforms = []string{"linux", "darwin"}
+	manifest.Tools = []Tool{{Name: "go_1.24", Platforms: []string{"linux", "darwin"}}}
+	data, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(repo, "terran.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = LoadManifest(repo)
+	if err != nil || !reflect.DeepEqual(loaded.Manifest.Projections[0].Platforms, []string{"darwin", "linux"}) || !reflect.DeepEqual(loaded.Manifest.Tools[0].Platforms, []string{"darwin", "linux"}) {
+		t.Fatalf("valid platforms/tools not normalized: %#v %v", loaded.Manifest, err)
+	}
+}
+
+func TestItemIDRoundTripAndValidation(t *testing.T) {
+	valid := []struct{ kind, target, name string }{
+		{"skill", "claude", "herdr"},
+		{"instruction", "claude-global", ""},
+		{"config", "naru-runtime", ""},
+		{"file", "claude-agent", "opus-worker.md"},
+		{"json-keys", "claude-settings", "hooks"},
+	}
+	for _, tc := range valid {
+		id := ItemID(tc.kind, tc.target, tc.name)
+		kind, target, name, err := ParseItemID(id)
+		if err != nil || kind != tc.kind || target != tc.target || name != tc.name {
+			t.Fatalf("ParseItemID(%q)=(%q,%q,%q,%v)", id, kind, target, name, err)
+		}
+	}
+
+	invalid := []string{"skill/../name", "skill//name", "skill/agents/name/extra", "instruction/claude-global/name", "skill/agents", "config/", "skill/agents/white space", "unknown/target/name"}
+	for _, id := range invalid {
+		if _, _, _, err := ParseItemID(id); err == nil {
+			t.Fatalf("invalid item id %q accepted", id)
+		} else if code, _ := ErrorCode(err); code != CodeUnknownItem {
+			t.Fatalf("invalid item id %q code=%q", id, code)
+		}
 	}
 }
 

@@ -39,7 +39,12 @@ func LoadReceipt(paths Paths) (receipt Receipt, err error) {
 			err = Coded(CodeReceiptInvalid, nextState, err)
 		}
 	}()
-	if err := readTrustedStateStrict(paths.Receipt, "receipt", &receipt, 4<<20); err != nil {
+	data, _, err := readTrustedFile(paths.Receipt, "receipt", 4<<20, 0o600)
+	if err != nil {
+		return Receipt{}, err
+	}
+	receipt, err = decodeReceipt(data)
+	if err != nil {
 		return Receipt{}, err
 	}
 	if receipt.SchemaVersion != SchemaVersion || receipt.RepositoryID == "" || !filepath.IsAbs(receipt.RepositoryPath) || filepath.Clean(receipt.RepositoryPath) != receipt.RepositoryPath {
@@ -47,7 +52,7 @@ func LoadReceipt(paths Paths) (receipt Receipt, err error) {
 	}
 	seen := map[string]bool{}
 	for _, p := range receipt.Projections {
-		if !skillNamePattern.MatchString(p.Skill) || p.Strategy != "symlink" || !filepath.IsAbs(p.Source) {
+		if p.Catalog != receipt.RepositoryID || !skillNamePattern.MatchString(p.Skill) || p.Strategy != "symlink" || !filepath.IsAbs(p.Source) {
 			return Receipt{}, fmt.Errorf("invalid receipt projection")
 		}
 		if _, ok := lookupTarget("skill", p.Target); !ok {
@@ -72,56 +77,33 @@ func LoadReceipt(paths Paths) (receipt Receipt, err error) {
 		seen[key] = true
 	}
 	seen = map[string]bool{}
-	for _, instruction := range receipt.Instructions {
-		destination, err := instructionDestination(paths, instruction.Target)
-		if err != nil || instruction.Strategy != "copy" || !validHash(instruction.SourceHash) || !validHash(instruction.AppliedHash) {
-			return Receipt{}, fmt.Errorf("invalid receipt instruction")
+	for _, managed := range receipt.Managed {
+		if (managed.Kind != "instruction" && managed.Kind != "config") || managed.Catalog != receipt.RepositoryID || managed.Name != "" {
+			return Receipt{}, fmt.Errorf("invalid receipt managed entry")
 		}
-		if seen[instruction.Target] {
-			return Receipt{}, fmt.Errorf("duplicate receipt instruction")
+		destination, err := managedFileDestination(paths, managed.Kind, managed.Target)
+		if err != nil || managed.Strategy != "copy" || !validHash(managed.SourceHash) || !validHash(managed.AppliedHash) {
+			return Receipt{}, fmt.Errorf("invalid receipt %s", managed.Kind)
 		}
-		seen[instruction.Target] = true
-		if instruction.Destination != destination || !filepath.IsAbs(instruction.Source) || filepath.Clean(instruction.Source) != instruction.Source || !contained(receipt.RepositoryPath, instruction.Source) {
-			return Receipt{}, fmt.Errorf("unsafe receipt instruction paths for %s", instruction.Target)
+		key := pairKey(managed.Kind, managed.Target)
+		if seen[key] {
+			return Receipt{}, fmt.Errorf("duplicate receipt %s", managed.Kind)
 		}
-		switch instruction.Origin {
+		seen[key] = true
+		if managed.Destination != destination || !filepath.IsAbs(managed.Source) || filepath.Clean(managed.Source) != managed.Source || !contained(receipt.RepositoryPath, managed.Source) {
+			return Receipt{}, fmt.Errorf("unsafe receipt %s paths for %s", managed.Kind, managed.Target)
+		}
+		switch managed.Origin {
 		case "created":
-			if instruction.OriginalHash != "" || instruction.OriginalMode != 0 || instruction.Backup != "" {
-				return Receipt{}, fmt.Errorf("invalid created instruction receipt for %s", instruction.Target)
+			if managed.OriginalHash != "" || managed.OriginalMode != 0 || managed.Backup != "" {
+				return Receipt{}, fmt.Errorf("invalid created %s receipt for %s", managed.Kind, managed.Target)
 			}
 		case "adopted":
-			if !validHash(instruction.OriginalHash) || instruction.OriginalMode&0o022 != 0 || instruction.OriginalMode&^0o777 != 0 || instruction.Backup != instructionBackup(paths, instruction.Target) {
-				return Receipt{}, fmt.Errorf("invalid adopted instruction receipt for %s", instruction.Target)
+			if !validHash(managed.OriginalHash) || managed.OriginalMode&0o022 != 0 || managed.OriginalMode&^0o777 != 0 || managed.Backup != instructionBackup(paths, managed.Target) {
+				return Receipt{}, fmt.Errorf("invalid adopted %s receipt for %s", managed.Kind, managed.Target)
 			}
 		default:
-			return Receipt{}, fmt.Errorf("invalid instruction origin for %s", instruction.Target)
-		}
-	}
-	seen = map[string]bool{}
-	for _, stored := range receipt.Configs {
-		config := ReceiptInstruction(stored)
-		destination, err := configDestination(paths, config.Target)
-		if err != nil || config.Strategy != "copy" || !validHash(config.SourceHash) || !validHash(config.AppliedHash) {
-			return Receipt{}, fmt.Errorf("invalid receipt config")
-		}
-		if seen[config.Target] {
-			return Receipt{}, fmt.Errorf("duplicate receipt config")
-		}
-		seen[config.Target] = true
-		if config.Destination != destination || !filepath.IsAbs(config.Source) || filepath.Clean(config.Source) != config.Source || !contained(receipt.RepositoryPath, config.Source) {
-			return Receipt{}, fmt.Errorf("unsafe receipt config paths for %s", config.Target)
-		}
-		switch config.Origin {
-		case "created":
-			if config.OriginalHash != "" || config.OriginalMode != 0 || config.Backup != "" {
-				return Receipt{}, fmt.Errorf("invalid created config receipt for %s", config.Target)
-			}
-		case "adopted":
-			if !validHash(config.OriginalHash) || config.OriginalMode&0o022 != 0 || config.OriginalMode&^0o777 != 0 || config.Backup != instructionBackup(paths, config.Target) {
-				return Receipt{}, fmt.Errorf("invalid adopted config receipt for %s", config.Target)
-			}
-		default:
-			return Receipt{}, fmt.Errorf("invalid config origin for %s", config.Target)
+			return Receipt{}, fmt.Errorf("invalid %s origin for %s", managed.Kind, managed.Target)
 		}
 	}
 	return receipt, nil
@@ -170,13 +152,15 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, filter string
 	for _, projection := range receipt.Projections {
 		ownedSkills[pairKey(projection.Skill, projection.Target)] = projection
 	}
-	ownedInstructions := map[string]ReceiptInstruction{}
-	for _, instruction := range receipt.Instructions {
-		ownedInstructions[instruction.Target] = instruction
-	}
-	ownedConfigs := map[string]ReceiptInstruction{}
-	for _, config := range receipt.Configs {
-		ownedConfigs[config.Target] = ReceiptInstruction(config)
+	ownedInstructions := map[string]ReceiptManaged{}
+	ownedConfigs := map[string]ReceiptManaged{}
+	for _, managed := range receipt.Managed {
+		switch managed.Kind {
+		case "instruction":
+			ownedInstructions[managed.Target] = managed
+		case "config":
+			ownedConfigs[managed.Target] = managed
+		}
 	}
 	desiredSkills := map[string]Action{}
 	for _, projection := range loaded.Manifest.Projections {
@@ -274,7 +258,7 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, filter string
 	return PlanResult{SchemaVersion: SchemaVersion, Clean: clean, Actions: actions}, nil
 }
 
-func classifyInstruction(paths Paths, action Action, sourceHash string, prior ReceiptInstruction, owned bool) (string, string) {
+func classifyInstruction(paths Paths, action Action, sourceHash string, prior ReceiptManaged, owned bool) (string, string) {
 	parent := filepath.Dir(action.Destination)
 	if _, err := os.Lstat(parent); errors.Is(err, os.ErrNotExist) {
 		if owned {
@@ -358,7 +342,7 @@ func validateProspectiveInstructionParent(parent string) error {
 	}
 }
 
-func classifyInstructionRemoval(paths Paths, prior ReceiptInstruction, destination string) (string, string) {
+func classifyInstructionRemoval(paths Paths, prior ReceiptManaged, destination string) (string, string) {
 	if err := validateInstructionParent(destination); err != nil {
 		return "blocked_drift", err.Error()
 	}
@@ -378,7 +362,7 @@ func classifyInstructionRemoval(paths Paths, prior ReceiptInstruction, destinati
 	return "restore", "adopted instruction is no longer in manifest"
 }
 
-func validateBackup(paths Paths, prior ReceiptInstruction) error {
+func validateBackup(paths Paths, prior ReceiptManaged) error {
 	backup := instructionBackup(paths, prior.Target)
 	if prior.Backup != backup {
 		return fmt.Errorf("instruction backup path does not match fixed target")
@@ -571,12 +555,9 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		for _, projection := range receipt.Projections {
 			ownedSkills[pairKey(projection.Skill, projection.Target)] = projection
 		}
-		ownedInstructions := map[string]ReceiptInstruction{}
-		for _, instruction := range receipt.Instructions {
-			ownedInstructions[instruction.Target] = instruction
-		}
-		for _, config := range receipt.Configs {
-			ownedInstructions[config.Target] = ReceiptInstruction(config)
+		ownedInstructions := map[string]ReceiptManaged{}
+		for _, managed := range receipt.Managed {
+			ownedInstructions[managed.Target] = managed
 		}
 		for _, action := range result.Actions {
 			if err := preflightAction(paths, loaded, action, ownedSkills, ownedInstructions, resolved); err != nil {
@@ -666,12 +647,12 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 					continue
 				}
 				destination, _ := skillDestination(paths, destinationTarget, projection.Skill)
-				newReceipt.Projections = append(newReceipt.Projections, ReceiptProjection{Skill: projection.Skill, Target: destinationTarget, Source: loaded.Sources[projection.Skill], Destination: destination, Strategy: "symlink", AppliedAt: now, TerranBuildVersion: buildVersion})
+				newReceipt.Projections = append(newReceipt.Projections, ReceiptProjection{Catalog: loaded.Manifest.ID, Skill: projection.Skill, Target: destinationTarget, Source: loaded.Sources[projection.Skill], Destination: destination, Strategy: "symlink", AppliedAt: now, TerranBuildVersion: buildVersion})
 			}
 		}
-		for _, old := range receipt.Instructions {
-			if !selectedInstruction(target, old.Target) {
-				newReceipt.Instructions = append(newReceipt.Instructions, old)
+		for _, old := range receipt.Managed {
+			if (old.Kind == "instruction" && !selectedInstruction(target, old.Target)) || (old.Kind == "config" && !selectedConfig(target, old.Target)) {
+				newReceipt.Managed = append(newReceipt.Managed, old)
 			}
 		}
 		for _, instruction := range loaded.Manifest.Instructions {
@@ -706,12 +687,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			if sourceHash == "" {
 				sourceHash = loaded.InstructionHashes[instruction.Target]
 			}
-			newReceipt.Instructions = append(newReceipt.Instructions, ReceiptInstruction{Target: instruction.Target, Source: loaded.InstructionSources[instruction.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
-		}
-		for _, old := range receipt.Configs {
-			if !selectedConfig(target, old.Target) {
-				newReceipt.Configs = append(newReceipt.Configs, old)
-			}
+			newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: "instruction", Catalog: loaded.Manifest.ID, Target: instruction.Target, Source: loaded.InstructionSources[instruction.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
 		}
 		for _, config := range loaded.Manifest.Configs {
 			if !selectedConfig(target, config.Target) {
@@ -745,13 +721,14 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			if sourceHash == "" {
 				sourceHash = loaded.ConfigHashes[config.Target]
 			}
-			newReceipt.Configs = append(newReceipt.Configs, ReceiptConfig{Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
+			newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: "config", Catalog: loaded.Manifest.ID, Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
 		}
 		sort.Slice(newReceipt.Projections, func(i, j int) bool {
 			return pairKey(newReceipt.Projections[i].Skill, newReceipt.Projections[i].Target) < pairKey(newReceipt.Projections[j].Skill, newReceipt.Projections[j].Target)
 		})
-		sort.Slice(newReceipt.Instructions, func(i, j int) bool { return newReceipt.Instructions[i].Target < newReceipt.Instructions[j].Target })
-		sort.Slice(newReceipt.Configs, func(i, j int) bool { return newReceipt.Configs[i].Target < newReceipt.Configs[j].Target })
+		sort.Slice(newReceipt.Managed, func(i, j int) bool {
+			return pairKey(newReceipt.Managed[i].Kind, newReceipt.Managed[i].Target) < pairKey(newReceipt.Managed[j].Kind, newReceipt.Managed[j].Target)
+		})
 		priorReceipt, _, priorReceiptErr := readTrustedFile(paths.Receipt, "receipt", 4<<20, 0o600)
 		priorReceiptExisted := priorReceiptErr == nil
 		if priorReceiptErr != nil && !errors.Is(priorReceiptErr, os.ErrNotExist) {
@@ -849,13 +826,8 @@ func actionFor(plan PlanResult, kind, target string) Action {
 }
 
 func receiptReferencesBackup(receipt Receipt, backup string) bool {
-	for _, instruction := range receipt.Instructions {
-		if instruction.Backup == backup {
-			return true
-		}
-	}
-	for _, config := range receipt.Configs {
-		if config.Backup == backup {
+	for _, managed := range receipt.Managed {
+		if managed.Backup == backup {
 			return true
 		}
 	}
@@ -1006,7 +978,7 @@ func preflightResolvedCollision(paths Paths, loaded LoadedManifest, action Actio
 	return nil
 }
 
-func preflightAction(paths Paths, loaded LoadedManifest, action Action, ownedSkills map[string]ReceiptProjection, ownedInstructions map[string]ReceiptInstruction, resolved map[string]resolvedCollision) error {
+func preflightAction(paths Paths, loaded LoadedManifest, action Action, ownedSkills map[string]ReceiptProjection, ownedInstructions map[string]ReceiptManaged, resolved map[string]resolvedCollision) error {
 	if err := revalidateLoadedManifest(loaded); err != nil {
 		return fmt.Errorf("revalidate catalog before %s: %w", action.Target, err)
 	}
@@ -1163,7 +1135,7 @@ type instructionRollback struct {
 	recovery        string
 }
 
-func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior ReceiptInstruction, verifiedSource []byte, expected resolvedCollision, hasExpected bool) (instructionRollback, error) {
+func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior ReceiptManaged, verifiedSource []byte, expected resolvedCollision, hasExpected bool) (instructionRollback, error) {
 	rollback := instructionRollback{destination: action.Destination}
 	if action.Action == "adopt" || action.Action == "replace" {
 		data, mode, err := readSafeFile(action.Destination, "instruction destination")

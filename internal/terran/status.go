@@ -126,8 +126,8 @@ func Doctor(buildVersion string) DoctorResult {
 		add("config_receipt", "fail", err.Error())
 	} else {
 		instructionHealthy := true
-		for _, instruction := range receipt.Instructions {
-			if !doctorManagedFile(paths, enrollment, "instruction", instruction, add) {
+		for _, managed := range receipt.Managed {
+			if managed.Kind == "instruction" && !doctorManagedFile(paths, enrollment, managed.Kind, managed, add) {
 				instructionHealthy = false
 			}
 		}
@@ -135,8 +135,8 @@ func Doctor(buildVersion string) DoctorResult {
 			add("instruction_receipt", "ok", "instruction receipt paths, hashes, modes, and backups are valid")
 		}
 		configHealthy := true
-		for _, stored := range receipt.Configs {
-			if !doctorManagedFile(paths, enrollment, "config", ReceiptInstruction(stored), add) {
+		for _, managed := range receipt.Managed {
+			if managed.Kind == "config" && !doctorManagedFile(paths, enrollment, managed.Kind, managed, add) {
 				configHealthy = false
 			}
 		}
@@ -168,7 +168,7 @@ func Doctor(buildVersion string) DoctorResult {
 	return result
 }
 
-func doctorManagedFile(paths Paths, enrollment Enrollment, kind string, managed ReceiptInstruction, add func(string, string, string)) bool {
+func doctorManagedFile(paths Paths, enrollment Enrollment, kind string, managed ReceiptManaged, add func(string, string, string)) bool {
 	name := kind + "_" + managed.Target
 	destination, destinationErr := managedFileDestination(paths, kind, managed.Target)
 	if destinationErr != nil || destination != managed.Destination || contained(enrollment.RepositoryPath, destination) {

@@ -17,6 +17,7 @@ const manifestLimit = 1 << 20
 const instructionLimit = 1 << 20
 
 var skillNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+var toolNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 type LoadedManifest struct {
 	Manifest           Manifest
@@ -53,12 +54,13 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	if err := validateTrustedFile(manifestPath, "manifest"); err != nil {
 		return LoadedManifest{}, err
 	}
-	var manifest Manifest
-	if err := readStrict(manifestPath, &manifest, manifestLimit); err != nil {
+	data, err := readFileLimited(manifestPath, manifestLimit)
+	if err != nil {
 		return LoadedManifest{}, fmt.Errorf("manifest: %w", err)
 	}
-	if manifest.SchemaVersion != SchemaVersion {
-		return LoadedManifest{}, fmt.Errorf("unsupported manifest schema_version %d", manifest.SchemaVersion)
+	manifest, err := decodeManifest(data)
+	if err != nil {
+		return LoadedManifest{}, fmt.Errorf("manifest: %w", err)
 	}
 	if !skillNamePattern.MatchString(manifest.ID) {
 		return LoadedManifest{}, fmt.Errorf("invalid repository id %q", manifest.ID)
@@ -74,6 +76,10 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	pairs := make(map[string]bool)
 	for i := range manifest.Projections {
 		p := &manifest.Projections[i]
+		if err := validatePlatforms(p.Platforms); err != nil {
+			return LoadedManifest{}, fmt.Errorf("platforms for skill %s: %w", p.Skill, err)
+		}
+		sort.Strings(p.Platforms)
 		if !skillNamePattern.MatchString(p.Skill) {
 			return LoadedManifest{}, fmt.Errorf("invalid skill name %q", p.Skill)
 		}
@@ -133,6 +139,10 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	})
 	for i := range manifest.Instructions {
 		instruction := &manifest.Instructions[i]
+		if err := validatePlatforms(instruction.Platforms); err != nil {
+			return LoadedManifest{}, fmt.Errorf("platforms for instruction %s: %w", instruction.Target, err)
+		}
+		sort.Strings(instruction.Platforms)
 		if _, ok := lookupTarget("instruction", instruction.Target); !ok {
 			return LoadedManifest{}, fmt.Errorf("unsupported instruction target %q", instruction.Target)
 		}
@@ -164,6 +174,10 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	sort.Slice(manifest.Instructions, func(i, j int) bool { return manifest.Instructions[i].Target < manifest.Instructions[j].Target })
 	for i := range manifest.Configs {
 		config := &manifest.Configs[i]
+		if err := validatePlatforms(config.Platforms); err != nil {
+			return LoadedManifest{}, fmt.Errorf("platforms for config %s: %w", config.Target, err)
+		}
+		sort.Strings(config.Platforms)
 		if _, ok := lookupTarget("config", config.Target); !ok {
 			return LoadedManifest{}, fmt.Errorf("unsupported config target %q", config.Target)
 		}
@@ -199,9 +213,72 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 		configHashes[config.Target] = hex.EncodeToString(sum[:])
 	}
 	sort.Slice(manifest.Configs, func(i, j int) bool { return manifest.Configs[i].Target < manifest.Configs[j].Target })
+	for i := range manifest.Files {
+		file := &manifest.Files[i]
+		if _, ok := lookupTarget("file", file.Target); !ok {
+			return LoadedManifest{}, fmt.Errorf("unsupported file target %q", file.Target)
+		}
+		if err := validatePlatforms(file.Platforms); err != nil {
+			return LoadedManifest{}, fmt.Errorf("platforms for file %s/%s: %w", file.Target, file.Name, err)
+		}
+		sort.Strings(file.Platforms)
+	}
+	sort.Slice(manifest.Files, func(i, j int) bool {
+		if manifest.Files[i].Target != manifest.Files[j].Target {
+			return manifest.Files[i].Target < manifest.Files[j].Target
+		}
+		if manifest.Files[i].Name != manifest.Files[j].Name {
+			return manifest.Files[i].Name < manifest.Files[j].Name
+		}
+		return manifest.Files[i].Source < manifest.Files[j].Source
+	})
+	for i := range manifest.JSONKeys {
+		item := &manifest.JSONKeys[i]
+		if _, ok := lookupTarget("json-keys", item.Target); !ok {
+			return LoadedManifest{}, fmt.Errorf("unsupported json-keys target %q", item.Target)
+		}
+		if err := validatePlatforms(item.Platforms); err != nil {
+			return LoadedManifest{}, fmt.Errorf("platforms for json-keys target %s: %w", item.Target, err)
+		}
+		sort.Strings(item.Platforms)
+	}
+	sort.Slice(manifest.JSONKeys, func(i, j int) bool {
+		if manifest.JSONKeys[i].Target != manifest.JSONKeys[j].Target {
+			return manifest.JSONKeys[i].Target < manifest.JSONKeys[j].Target
+		}
+		return manifest.JSONKeys[i].Source < manifest.JSONKeys[j].Source
+	})
+	for i := range manifest.Tools {
+		tool := &manifest.Tools[i]
+		if !toolNamePattern.MatchString(tool.Name) {
+			return LoadedManifest{}, fmt.Errorf("invalid tool name %q", tool.Name)
+		}
+		if err := validatePlatforms(tool.Platforms); err != nil {
+			return LoadedManifest{}, fmt.Errorf("platforms for tool %s: %w", tool.Name, err)
+		}
+		sort.Strings(tool.Platforms)
+	}
+	sort.Slice(manifest.Tools, func(i, j int) bool { return manifest.Tools[i].Name < manifest.Tools[j].Name })
 	normalized, _ := json.Marshal(manifest)
 	sum := sha256.Sum256(normalized)
 	return LoadedManifest{manifest, canonicalRepo, hex.EncodeToString(sum[:]), sources, instructionSources, instructionHashes, configSources, configHashes}, nil
+}
+
+func validatePlatforms(platforms []string) error {
+	if platforms != nil && len(platforms) == 0 {
+		return fmt.Errorf("must not be empty when present")
+	}
+	seen := make(map[string]bool)
+	for _, platform := range platforms {
+		if platform != "darwin" && platform != "linux" {
+			return fmt.Errorf("unsupported platform %q", platform)
+		}
+		if seen[platform] {
+			return fmt.Errorf("duplicate platform %q", platform)
+		}
+		seen[platform] = true
+	}
+	return nil
 }
 
 func revalidateLoadedManifest(expected LoadedManifest) error {

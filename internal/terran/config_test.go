@@ -284,7 +284,7 @@ func TestNaruRuntimeConfigProjectsWithOpenCode(t *testing.T) {
 	}
 	paths, _ := ResolvePaths()
 	receipt, err := LoadReceipt(paths)
-	if err != nil || len(receipt.Configs) != 2 {
+	if err != nil || len(receipt.Managed) != 2 || receipt.Managed[0].Kind != "config" || receipt.Managed[1].Kind != "config" {
 		t.Fatalf("both configs should be owned: %#v %v", receipt, err)
 	}
 	if data, err := os.ReadFile(want); err != nil || string(data) != runtime {
@@ -308,7 +308,7 @@ func TestFilteredSkillApplyPreservesConfigReceipt(t *testing.T) {
 	}
 	paths, _ := ResolvePaths()
 	before, err := LoadReceipt(paths)
-	if err != nil || len(before.Configs) != 1 {
+	if err != nil || len(before.Managed) != 1 || before.Managed[0].Kind != "config" {
 		t.Fatalf("initial config receipt: %#v %v", before, err)
 	}
 
@@ -336,8 +336,8 @@ func TestFilteredSkillApplyPreservesConfigReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, err := LoadReceipt(paths)
-	if err != nil || len(after.Configs) != 1 || after.Configs[0] != before.Configs[0] {
-		t.Fatalf("filtered apply changed config ownership metadata: before=%#v after=%#v err=%v", before.Configs, after.Configs, err)
+	if err != nil || len(after.Managed) != 1 || after.Managed[0] != before.Managed[0] {
+		t.Fatalf("filtered apply changed config ownership metadata: before=%#v after=%#v err=%v", before.Managed, after.Managed, err)
 	}
 }
 
@@ -358,7 +358,7 @@ func TestConfigCreateUpdateNoopDriftRemoveStatusDoctorAndReceipt(t *testing.T) {
 		t.Fatalf("created config mode is %o", fileMode(t, destination))
 	}
 	receipt, err := LoadReceipt(paths)
-	if err != nil || len(receipt.Configs) != 1 || len(receipt.Instructions) != 0 || receipt.Configs[0].Target != "opencode-config" {
+	if err != nil || len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "config" || receipt.Managed[0].Target != "opencode-config" {
 		t.Fatalf("config receipt is not distinct: %#v %v", receipt, err)
 	}
 	if plan, err := Plan("opencode"); err != nil || !plan.Clean || actionCount(plan, "noop") != 1 {
@@ -432,7 +432,7 @@ func TestConfigAdoptRestoreCollisionAndReceiptValidation(t *testing.T) {
 			t.Fatal(err)
 		}
 		receipt, _ := LoadReceipt(paths)
-		if len(receipt.Configs) != 1 || receipt.Configs[0].Origin != "adopted" || receipt.Configs[0].OriginalMode != 0o640 || fileMode(t, receipt.Configs[0].Backup) != 0o600 {
+		if len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "config" || receipt.Managed[0].Origin != "adopted" || receipt.Managed[0].OriginalMode != 0o640 || fileMode(t, receipt.Managed[0].Backup) != 0o600 {
 			t.Fatalf("adopted config receipt/backup invalid: %#v", receipt)
 		}
 		if err := os.WriteFile(filepath.Join(repo, "config", "opencode.json"), []byte(`{"default_agent":"naru"}`), 0o644); err != nil {
@@ -473,7 +473,7 @@ func TestConfigAdoptRestoreCollisionAndReceiptValidation(t *testing.T) {
 		_, _ = Apply("opencode", "test")
 		paths, _ := ResolvePaths()
 		receipt, _ := LoadReceipt(paths)
-		receipt.Configs[0].Destination = filepath.Join(paths.Home, "outside")
+		receipt.Managed[0].Destination = filepath.Join(paths.Home, "outside")
 		if err := atomicJSON(paths.Receipt, receipt); err != nil {
 			t.Fatal(err)
 		}

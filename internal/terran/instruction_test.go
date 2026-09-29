@@ -226,7 +226,7 @@ func TestInstructionAdoptionPreservesFileAndCreatesBackup(t *testing.T) {
 		t.Fatalf("invalid backup: %v", err)
 	}
 	receipt, err := LoadReceipt(paths)
-	if err != nil || len(receipt.Instructions) != 1 || receipt.Instructions[0].Origin != "adopted" || receipt.Instructions[0].OriginalMode != 0o640 {
+	if err != nil || len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "instruction" || receipt.Managed[0].Origin != "adopted" || receipt.Managed[0].OriginalMode != 0o640 {
 		t.Fatalf("invalid adoption receipt: %#v %v", receipt, err)
 	}
 }
@@ -293,7 +293,7 @@ func TestInstructionCreateUpdateNoopDriftAndFiltering(t *testing.T) {
 	}
 	paths, _ := ResolvePaths()
 	receipt, _ := LoadReceipt(paths)
-	if len(receipt.Instructions) != 1 || receipt.Instructions[0].Target != "opencode-global" {
+	if len(receipt.Managed) != 1 || receipt.Managed[0].Kind != "instruction" || receipt.Managed[0].Target != "opencode-global" {
 		t.Fatalf("filtered receipt: %#v", receipt)
 	}
 	if _, err := Apply("claude", "test"); err != nil {
@@ -482,23 +482,23 @@ func TestInstructionReceiptSafetyAndLegacyCompatibility(t *testing.T) {
 	_, _ = Apply("claude", "test")
 	paths, _ := ResolvePaths()
 	receipt, _ := LoadReceipt(paths)
-	receipt.Instructions[0].Destination = filepath.Join(paths.Home, "outside")
+	receipt.Managed[0].Destination = filepath.Join(paths.Home, "outside")
 	if err := atomicJSON(paths.Receipt, receipt); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadReceipt(paths); err == nil {
 		t.Fatal("malicious destination accepted")
 	}
-	receipt.Instructions[0].Destination, _ = instructionDestination(paths, "claude-global")
-	receipt.Instructions[0].Source = filepath.Join(paths.Home, "outside")
+	receipt.Managed[0].Destination, _ = instructionDestination(paths, "claude-global")
+	receipt.Managed[0].Source = filepath.Join(paths.Home, "outside")
 	if err := atomicJSON(paths.Receipt, receipt); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadReceipt(paths); err == nil {
 		t.Fatal("malicious source accepted")
 	}
-	receipt.Instructions[0].Source = filepath.Join(repo, "instructions", "claude-global.md")
-	receipt.Instructions[0].Backup = filepath.Join(paths.Home, "outside")
+	receipt.Managed[0].Source = filepath.Join(repo, "instructions", "claude-global.md")
+	receipt.Managed[0].Backup = filepath.Join(paths.Home, "outside")
 	if err := atomicJSON(paths.Receipt, receipt); err != nil {
 		t.Fatal(err)
 	}
@@ -511,8 +511,177 @@ func TestInstructionReceiptSafetyAndLegacyCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := LoadReceipt(paths)
-	if err != nil || loaded.Instructions != nil {
+	if err != nil || loaded.Managed != nil {
 		t.Fatalf("legacy receipt failed: %#v %v", loaded, err)
+	}
+}
+
+func TestV03StateUpgradeDoesNotRewriteManagedDestinations(t *testing.T) {
+	home, repo := instructionEnvironment(t, "claude-global", "opencode-global")
+	projections := []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}}}
+	instructions := []Instruction{
+		{Target: "claude-global", Source: "instructions/claude-global.md"},
+		{Target: "opencode-global", Source: "instructions/opencode-global.md"},
+	}
+	writeCatalogWithInstructions(t, repo, projections, instructions)
+	prepareInstructionParents(t)
+	if _, _, err := Enroll(repo, "v0.3", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "0.3.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	paths, _ := ResolvePaths()
+	enrollment, err := LoadEnrollment(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := LoadReceipt(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1Manifest := manifestV1{
+		SchemaVersion: 1,
+		ID:            "test-catalog",
+		Version:       "0.1.0",
+		Projections:   []projectionV1{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}}},
+		Instructions: []instructionV1{
+			{Target: "claude-global", Source: "instructions/claude-global.md"},
+			{Target: "opencode-global", Source: "instructions/opencode-global.md"},
+		},
+	}
+	v1Enrollment := enrollmentV1{
+		SchemaVersion:   1,
+		RepositoryID:    enrollment.RepositoryID,
+		RepositoryPath:  enrollment.RepositoryPath,
+		CommandCenterID: enrollment.CommandCenterID,
+		DisplayName:     enrollment.DisplayName,
+	}
+	v1NormalizedManifest, _ := json.Marshal(v1Manifest)
+	v1Receipt := receiptV1{
+		SchemaVersion:       1,
+		RepositoryID:        receipt.RepositoryID,
+		RepositoryPath:      receipt.RepositoryPath,
+		RepositoryVersion:   receipt.RepositoryVersion,
+		ManifestFingerprint: hashBytes(v1NormalizedManifest),
+	}
+	for _, projection := range receipt.Projections {
+		v1Receipt.Projections = append(v1Receipt.Projections, receiptProjectionV1{
+			Skill: projection.Skill, Target: projection.Target, Source: projection.Source, Destination: projection.Destination,
+			Strategy: projection.Strategy, AppliedAt: projection.AppliedAt, TerranBuildVersion: projection.TerranBuildVersion,
+		})
+	}
+	for _, managed := range receipt.Managed {
+		entry := receiptInstructionV1{
+			Target: managed.Target, Source: managed.Source, Destination: managed.Destination, Strategy: managed.Strategy,
+			SourceHash: managed.SourceHash, AppliedHash: managed.AppliedHash, Origin: managed.Origin, OriginalHash: managed.OriginalHash,
+			OriginalMode: managed.OriginalMode, Backup: managed.Backup, AppliedAt: managed.AppliedAt, TerranBuildVersion: managed.TerranBuildVersion,
+		}
+		if managed.Kind == "instruction" {
+			v1Receipt.Instructions = append(v1Receipt.Instructions, entry)
+		}
+	}
+
+	manifestBytes, _ := marshalJSON(v1Manifest)
+	enrollmentBytes, _ := marshalJSON(v1Enrollment)
+	receiptBytes, _ := marshalJSON(v1Receipt)
+	if err := os.WriteFile(filepath.Join(repo, "terran.json"), manifestBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, enrollmentBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Receipt, receiptBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	destinations := []string{
+		filepath.Join(home, ".agents", "skills", "example"),
+		filepath.Join(home, ".claude", "skills", "example"),
+		filepath.Join(home, ".claude", "CLAUDE.md"),
+		filepath.Join(home, "config", "opencode", "AGENTS.md"),
+	}
+	before := make(map[string]managedDestinationSnapshot, len(destinations))
+	for _, destination := range destinations {
+		before[destination] = snapshotManagedDestination(t, destination)
+	}
+
+	loaded, err := LoadManifest(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Fingerprint == v1Receipt.ManifestFingerprint {
+		t.Fatal("test fixture did not exercise a changed normalized v2 fingerprint")
+	}
+	plan, err := Plan("all")
+	if err != nil || len(plan.Actions) != len(destinations) || actionCount(plan, "noop") != len(destinations) {
+		t.Fatalf("v0.3 plan was not all noop: %#v %v", plan, err)
+	}
+	if _, err := Apply("all", "0.4.0"); err != nil {
+		t.Fatal(err)
+	}
+	for _, destination := range destinations {
+		assertManagedDestinationUnchanged(t, destination, before[destination], snapshotManagedDestination(t, destination))
+	}
+
+	afterManifest, _ := os.ReadFile(filepath.Join(repo, "terran.json"))
+	afterEnrollment, _ := os.ReadFile(paths.ConfigFile)
+	afterReceipt, _ := os.ReadFile(paths.Receipt)
+	if !bytes.Equal(afterManifest, manifestBytes) || !bytes.Equal(afterEnrollment, enrollmentBytes) {
+		t.Fatal("apply rewrote the v1 manifest or enrollment")
+	}
+	if bytes.Equal(afterReceipt, receiptBytes) {
+		t.Fatal("apply did not upgrade receipt.json")
+	}
+	upgraded, err := LoadReceipt(paths)
+	if err != nil || upgraded.SchemaVersion != SchemaVersion || len(upgraded.Projections) != 2 || len(upgraded.Managed) != 2 {
+		t.Fatalf("upgraded receipt invalid: %#v %v", upgraded, err)
+	}
+	for _, projection := range upgraded.Projections {
+		if projection.Catalog != upgraded.RepositoryID {
+			t.Fatalf("projection catalog not set: %#v", projection)
+		}
+	}
+	for _, managed := range upgraded.Managed {
+		if managed.Kind != "instruction" || managed.Catalog != upgraded.RepositoryID {
+			t.Fatalf("managed catalog not set: %#v", managed)
+		}
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(afterReceipt, &raw); err != nil || raw["schema_version"] == nil || raw["managed"] == nil || raw["instructions"] != nil || raw["configs"] != nil {
+		t.Fatalf("receipt did not use the v2 wire shape: keys=%v err=%v", raw, err)
+	}
+}
+
+type managedDestinationSnapshot struct {
+	info os.FileInfo
+	link string
+	hash string
+}
+
+func snapshotManagedDestination(t *testing.T, path string) managedDestinationSnapshot {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := managedDestinationSnapshot{info: info}
+	if info.Mode()&os.ModeSymlink != 0 {
+		snapshot.link, err = os.Readlink(path)
+	} else {
+		snapshot.hash, err = fileHash(path)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func assertManagedDestinationUnchanged(t *testing.T, path string, before, after managedDestinationSnapshot) {
+	t.Helper()
+	if !os.SameFile(before.info, after.info) || before.info.Mode() != after.info.Mode() || before.info.Size() != after.info.Size() || !before.info.ModTime().Equal(after.info.ModTime()) || before.link != after.link || before.hash != after.hash {
+		t.Fatalf("managed destination changed during schema upgrade: %s", path)
 	}
 }
 

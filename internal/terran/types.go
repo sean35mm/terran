@@ -2,54 +2,83 @@ package terran
 
 import "time"
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 type Manifest struct {
-	SchemaVersion int           `json:"schema_version"`
-	ID            string        `json:"id"`
-	Version       string        `json:"version"`
-	Projections   []Projection  `json:"projections"`
-	Instructions  []Instruction `json:"instructions,omitempty"`
-	Configs       []Config      `json:"configs,omitempty"`
+	SchemaVersion int            `json:"schema_version"`
+	ID            string         `json:"id"`
+	Version       string         `json:"version"`
+	Projections   []Projection   `json:"projections"`
+	Instructions  []Instruction  `json:"instructions,omitempty"`
+	Configs       []Config       `json:"configs,omitempty"`
+	Files         []FileItem     `json:"files,omitempty"`
+	JSONKeys      []JSONKeysItem `json:"json_keys,omitempty"`
+	Tools         []Tool         `json:"tools,omitempty"`
 }
 
 type Projection struct {
-	Skill   string   `json:"skill"`
-	Source  string   `json:"source"`
-	Targets []string `json:"targets"`
+	Skill     string   `json:"skill"`
+	Source    string   `json:"source"`
+	Targets   []string `json:"targets"`
+	Platforms []string `json:"platforms,omitempty"`
 }
 
 type Instruction struct {
-	Target string `json:"target"`
-	Source string `json:"source"`
+	Target    string   `json:"target"`
+	Source    string   `json:"source"`
+	Platforms []string `json:"platforms,omitempty"`
 }
 
 type Config struct {
-	Target string `json:"target"`
-	Source string `json:"source"`
+	Target    string   `json:"target"`
+	Source    string   `json:"source"`
+	Platforms []string `json:"platforms,omitempty"`
+}
+
+type FileItem struct {
+	Target    string   `json:"target"`
+	Name      string   `json:"name"`
+	Source    string   `json:"source"`
+	Platforms []string `json:"platforms,omitempty"`
+}
+
+type JSONKeysItem struct {
+	Target    string   `json:"target"`
+	Source    string   `json:"source"`
+	Platforms []string `json:"platforms,omitempty"`
+}
+
+type Tool struct {
+	Name      string   `json:"name"`
+	Platforms []string `json:"platforms,omitempty"`
 }
 
 type Enrollment struct {
-	SchemaVersion   int    `json:"schema_version"`
-	RepositoryID    string `json:"repository_id"`
-	RepositoryPath  string `json:"repository_path"`
-	CommandCenterID string `json:"command_center_id"`
-	DisplayName     string `json:"display_name"`
+	SchemaVersion   int      `json:"schema_version"`
+	RepositoryID    string   `json:"repository_id"`
+	RepositoryPath  string   `json:"repository_path"`
+	CommandCenterID string   `json:"command_center_id"`
+	DisplayName     string   `json:"display_name"`
+	OverlayID       string   `json:"overlay_id,omitempty"`
+	OverlayPath     string   `json:"overlay_path,omitempty"`
+	Holds           []string `json:"holds,omitempty"`
 }
 
 type Receipt struct {
-	SchemaVersion       int                  `json:"schema_version"`
-	RepositoryID        string               `json:"repository_id"`
-	RepositoryPath      string               `json:"repository_path"`
-	RepositoryVersion   string               `json:"repository_version"`
-	ManifestFingerprint string               `json:"manifest_fingerprint"`
-	Projections         []ReceiptProjection  `json:"projections"`
-	Instructions        []ReceiptInstruction `json:"instructions,omitempty"`
-	Configs             []ReceiptConfig      `json:"configs,omitempty"`
+	SchemaVersion       int                 `json:"schema_version"`
+	RepositoryID        string              `json:"repository_id"`
+	RepositoryPath      string              `json:"repository_path"`
+	RepositoryVersion   string              `json:"repository_version"`
+	ManifestFingerprint string              `json:"manifest_fingerprint"`
+	Projections         []ReceiptProjection `json:"projections"`
+	Managed             []ReceiptManaged    `json:"managed,omitempty"`
 }
 
-type ReceiptInstruction struct {
+type ReceiptManaged struct {
+	Kind               string    `json:"kind"`
+	Catalog            string    `json:"catalog"`
 	Target             string    `json:"target"`
+	Name               string    `json:"name,omitempty"`
 	Source             string    `json:"source"`
 	Destination        string    `json:"destination"`
 	Strategy           string    `json:"strategy"`
@@ -63,9 +92,8 @@ type ReceiptInstruction struct {
 	TerranBuildVersion string    `json:"terran_build_version"`
 }
 
-type ReceiptConfig ReceiptInstruction
-
 type ReceiptProjection struct {
+	Catalog            string    `json:"catalog"`
 	Skill              string    `json:"skill"`
 	Target             string    `json:"target"`
 	Source             string    `json:"source"`

@@ -25,19 +25,27 @@ func decodeStrict(data []byte, value any) error {
 }
 
 func readStrict(path string, value any, max int64) error {
-	f, err := os.Open(path)
+	data, err := readFileLimited(path, max)
 	if err != nil {
 		return err
+	}
+	return decodeStrict(data, value)
+}
+
+func readFileLimited(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if int64(len(data)) > max {
-		return fmt.Errorf("%s exceeds %d bytes", path, max)
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, max)
 	}
-	return decodeStrict(data, value)
+	return data, nil
 }
 
 func readTrustedStateStrict(path, description string, value any, max int64) error {
