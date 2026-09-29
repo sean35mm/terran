@@ -25,14 +25,40 @@ func selectedSkill(filter, target string) bool {
 	return filter == "all" || (ok && spec.Group == filter)
 }
 
-func selectedInstruction(filter, target string) bool {
-	spec, ok := lookupTarget("instruction", target)
+func selectedManaged(filter, kind, target string) bool {
+	spec, ok := lookupTarget(kind, target)
 	return filter == "all" || (ok && spec.Group == filter)
 }
 
-func selectedConfig(filter, target string) bool {
-	spec, ok := lookupTarget("config", target)
-	return filter == "all" || (ok && spec.Group == filter)
+// managedItem is one desired whole-file item: an instruction, a config, or a
+// named file. Instructions and configs have an empty Name.
+type managedItem struct {
+	Kind, Target, Name, Source, Hash string
+	Platforms                        []string
+}
+
+func (item managedItem) id() string { return ItemID(item.Kind, item.Target, item.Name) }
+
+func (loaded LoadedManifest) managedItems() []managedItem {
+	var items []managedItem
+	for _, instruction := range loaded.Manifest.Instructions {
+		items = append(items, managedItem{"instruction", instruction.Target, "", loaded.InstructionSources[instruction.Target], loaded.InstructionHashes[instruction.Target], instruction.Platforms})
+	}
+	for _, config := range loaded.Manifest.Configs {
+		items = append(items, managedItem{"config", config.Target, "", loaded.ConfigSources[config.Target], loaded.ConfigHashes[config.Target], config.Platforms})
+	}
+	for _, file := range loaded.Manifest.Files {
+		id := ItemID("file", file.Target, file.Name)
+		items = append(items, managedItem{"file", file.Target, file.Name, loaded.FileSources[id], loaded.FileHashes[id], file.Platforms})
+	}
+	return items
+}
+
+func managedLabel(target, name string) string {
+	if name == "" {
+		return target
+	}
+	return target + "/" + name
 }
 
 // LoadReceipt validates the receipt against the enrollment: every entry must
@@ -94,14 +120,14 @@ func LoadReceipt(paths Paths, enrollment Enrollment) (receipt Receipt, err error
 	seen = map[string]bool{}
 	for _, managed := range receipt.Managed {
 		repository, known := catalogRepository(managed.Catalog)
-		if (managed.Kind != "instruction" && managed.Kind != "config") || !known || managed.Name != "" {
+		if (managed.Kind != "instruction" && managed.Kind != "config" && managed.Kind != "file") || !known || (managed.Kind == "file") == (managed.Name == "") {
 			return Receipt{}, fmt.Errorf("invalid receipt managed entry")
 		}
-		destination, err := managedFileDestination(paths, managed.Kind, managed.Target)
+		destination, err := managedFileDestination(paths, managed.Kind, managed.Target, managed.Name)
 		if err != nil || managed.Strategy != "copy" || !validHash(managed.SourceHash) || !validHash(managed.AppliedHash) {
 			return Receipt{}, fmt.Errorf("invalid receipt %s", managed.Kind)
 		}
-		key := pairKey(managed.Kind, managed.Target)
+		key := ItemID(managed.Kind, managed.Target, managed.Name)
 		if seen[key] {
 			return Receipt{}, fmt.Errorf("duplicate receipt %s", managed.Kind)
 		}
@@ -115,7 +141,7 @@ func LoadReceipt(paths Paths, enrollment Enrollment) (receipt Receipt, err error
 				return Receipt{}, fmt.Errorf("invalid created %s receipt for %s", managed.Kind, managed.Target)
 			}
 		case "adopted":
-			if !validHash(managed.OriginalHash) || managed.OriginalMode&0o022 != 0 || managed.OriginalMode&^0o777 != 0 || managed.Backup != instructionBackup(paths, managed.Target) {
+			if !validHash(managed.OriginalHash) || managed.OriginalMode&0o022 != 0 || managed.OriginalMode&^0o777 != 0 || managed.Backup != managedBackup(paths, managed.Kind, managed.Target, managed.Name) {
 				return Receipt{}, fmt.Errorf("invalid adopted %s receipt for %s", managed.Kind, managed.Target)
 			}
 		default:
@@ -217,15 +243,9 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 	for _, projection := range receipt.Projections {
 		ownedSkills[pairKey(projection.Skill, projection.Target)] = projection
 	}
-	ownedInstructions := map[string]ReceiptManaged{}
-	ownedConfigs := map[string]ReceiptManaged{}
+	ownedManaged := map[string]ReceiptManaged{}
 	for _, managed := range receipt.Managed {
-		switch managed.Kind {
-		case "instruction":
-			ownedInstructions[managed.Target] = managed
-		case "config":
-			ownedConfigs[managed.Target] = managed
-		}
+		ownedManaged[ItemID(managed.Kind, managed.Target, managed.Name)] = managed
 	}
 	desiredSkills := map[string]bool{}
 	for _, loaded := range catalogs.list() {
@@ -265,68 +285,36 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 			return "blocked_drift", "receipt-owned projection is missing or changed"
 		})
 	}
-	desiredInstructions := map[string]bool{}
+	desiredManaged := map[string]bool{}
 	for _, loaded := range catalogs.list() {
-		for _, instruction := range loaded.Manifest.Instructions {
-			if !selectedInstruction(filter, instruction.Target) {
+		for _, item := range loaded.managedItems() {
+			if !selectedManaged(filter, item.Kind, item.Target) {
 				continue
 			}
-			destination, _ := instructionDestination(paths, instruction.Target)
+			destination, _ := managedFileDestination(paths, item.Kind, item.Target, item.Name)
 			if catalogs.insideAny(destination) {
-				return PlanResult{}, fmt.Errorf("instruction destination for %s must not be inside a catalog repository", instruction.Target)
+				return PlanResult{}, fmt.Errorf("%s destination for %s must not be inside a catalog repository", item.Kind, managedLabel(item.Target, item.Name))
 			}
-			action := Action{ID: ItemID("instruction", instruction.Target, ""), Kind: "instruction", Catalog: loaded.Manifest.ID, Target: instruction.Target, Source: loaded.InstructionSources[instruction.Target], Destination: destination}
-			prior, owned := ownedInstructions[instruction.Target]
-			if !platformIncluded(instruction.Platforms) {
+			action := Action{ID: item.id(), Kind: item.Kind, Catalog: loaded.Manifest.ID, Target: item.Target, Name: item.Name, Source: item.Source, Destination: destination}
+			prior, owned := ownedManaged[action.ID]
+			if !platformIncluded(item.Platforms) {
 				if !owned {
-					add(action, excluded(instruction.Platforms))
+					add(action, excluded(item.Platforms))
 				}
 				continue
 			}
-			desiredInstructions[instruction.Target] = true
+			desiredManaged[action.ID] = true
 			add(action, func() (string, string) {
-				return classifyInstruction(paths, action, loaded.InstructionHashes[instruction.Target], prior, owned)
+				return classifyInstruction(paths, action, item.Hash, prior, owned)
 			})
 		}
 	}
-	for _, prior := range ownedInstructions {
-		if !selectedInstruction(filter, prior.Target) || desiredInstructions[prior.Target] {
+	for id, prior := range ownedManaged {
+		if !selectedManaged(filter, prior.Kind, prior.Target) || desiredManaged[id] {
 			continue
 		}
-		destination, _ := instructionDestination(paths, prior.Target)
-		action := Action{ID: ItemID("instruction", prior.Target, ""), Kind: "instruction", Catalog: prior.Catalog, Target: prior.Target, Source: prior.Source, Destination: destination}
-		add(action, func() (string, string) { return classifyInstructionRemoval(paths, prior, destination) })
-	}
-	desiredConfigs := map[string]bool{}
-	for _, loaded := range catalogs.list() {
-		for _, config := range loaded.Manifest.Configs {
-			if !selectedConfig(filter, config.Target) {
-				continue
-			}
-			destination, _ := configDestination(paths, config.Target)
-			if catalogs.insideAny(destination) {
-				return PlanResult{}, fmt.Errorf("config destination for %s must not be inside a catalog repository", config.Target)
-			}
-			action := Action{ID: ItemID("config", config.Target, ""), Kind: "config", Catalog: loaded.Manifest.ID, Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination}
-			prior, owned := ownedConfigs[config.Target]
-			if !platformIncluded(config.Platforms) {
-				if !owned {
-					add(action, excluded(config.Platforms))
-				}
-				continue
-			}
-			desiredConfigs[config.Target] = true
-			add(action, func() (string, string) {
-				return classifyInstruction(paths, action, loaded.ConfigHashes[config.Target], prior, owned)
-			})
-		}
-	}
-	for _, prior := range ownedConfigs {
-		if !selectedConfig(filter, prior.Target) || desiredConfigs[prior.Target] {
-			continue
-		}
-		destination, _ := configDestination(paths, prior.Target)
-		action := Action{ID: ItemID("config", prior.Target, ""), Kind: "config", Catalog: prior.Catalog, Target: prior.Target, Source: prior.Source, Destination: destination}
+		destination, _ := managedFileDestination(paths, prior.Kind, prior.Target, prior.Name)
+		action := Action{ID: id, Kind: prior.Kind, Catalog: prior.Catalog, Target: prior.Target, Name: prior.Name, Source: prior.Source, Destination: destination}
 		add(action, func() (string, string) { return classifyInstructionRemoval(paths, prior, destination) })
 	}
 	sort.Slice(actions, func(i, j int) bool {
@@ -336,7 +324,10 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 		if actions[i].Target != actions[j].Target {
 			return actions[i].Target < actions[j].Target
 		}
-		return actions[i].Skill < actions[j].Skill
+		if actions[i].Skill != actions[j].Skill {
+			return actions[i].Skill < actions[j].Skill
+		}
+		return actions[i].Name < actions[j].Name
 	})
 	clean := true
 	for _, action := range actions {
@@ -373,6 +364,9 @@ func classifyInstruction(paths Paths, action Action, sourceHash string, prior Re
 		if err != nil || hash != prior.AppliedHash {
 			return "blocked_drift", "receipt-owned instruction is missing or changed"
 		}
+		if err := validateExecutableMode(action.Kind, action.Target, action.Destination); err != nil {
+			return "blocked_drift", err.Error()
+		}
 		if sourceHash == prior.SourceHash {
 			return "noop", ""
 		}
@@ -393,7 +387,10 @@ func classifyInstruction(paths Paths, action Action, sourceHash string, prior Re
 	if hash != sourceHash {
 		return "blocked_collision", "instruction destination differs from source"
 	}
-	backup := instructionBackup(paths, action.Target)
+	if err := validateExecutableMode(action.Kind, action.Target, action.Destination); err != nil {
+		return "blocked_collision", err.Error()
+	}
+	backup := managedBackup(paths, action.Kind, action.Target, action.Name)
 	if _, err := os.Lstat(backup); !errors.Is(err, os.ErrNotExist) {
 		if err != nil {
 			return "blocked_collision", err.Error()
@@ -442,6 +439,9 @@ func classifyInstructionRemoval(paths Paths, prior ReceiptManaged, destination s
 	if err != nil || hash != prior.AppliedHash {
 		return "blocked_drift", "receipt-owned instruction is missing or changed"
 	}
+	if err := validateExecutableMode(prior.Kind, prior.Target, destination); err != nil {
+		return "blocked_drift", err.Error()
+	}
 	if prior.Origin == "created" {
 		return "remove", "created instruction is no longer in manifest"
 	}
@@ -451,8 +451,25 @@ func classifyInstructionRemoval(paths Paths, prior ReceiptManaged, destination s
 	return "restore", "adopted instruction is no longer in manifest"
 }
 
+// validateExecutableMode requires targets with an executable mode, such as
+// hooks, to keep exactly that mode; other managed files ignore mode.
+func validateExecutableMode(kind, target, path string) error {
+	spec, ok := lookupTarget(kind, target)
+	if !ok || spec.Mode&0o111 == 0 {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() != spec.Mode {
+		return fmt.Errorf("%s file %s must be mode %04o", target, path, spec.Mode)
+	}
+	return nil
+}
+
 func validateBackup(paths Paths, prior ReceiptManaged) error {
-	backup := instructionBackup(paths, prior.Target)
+	backup := managedBackup(paths, prior.Kind, prior.Target, prior.Name)
 	if prior.Backup != backup {
 		return fmt.Errorf("instruction backup path does not match fixed target")
 	}
@@ -639,7 +656,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		}
 		ownedInstructions := map[string]ReceiptManaged{}
 		for _, managed := range receipt.Managed {
-			ownedInstructions[managed.Target] = managed
+			ownedInstructions[ItemID(managed.Kind, managed.Target, managed.Name)] = managed
 		}
 		for _, action := range result.Actions {
 			if err := preflightAction(paths, catalogs, action, ownedSkills, ownedInstructions, resolved); err != nil {
@@ -679,16 +696,16 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 			}
 			var sourceBytes []byte
-			if expectedHash, desired := managedSourceHash(loaded, action.Kind, action.Target); desired {
+			if expectedHash, desired := managedSourceHash(loaded, action.Kind, action.Target, action.Name); desired {
 				sourceBytes, err = readVerifiedManagedSource(loaded.Repository, action.Kind, action.Target, action.Source, expectedHash)
 				if err != nil {
 					rollbackErr := rollbackAll(rollbacks, skillRollbacks)
 					return errors.Join(err, rollbackErr)
 				}
-				verifiedInstructionHashes[action.Target] = hashBytes(sourceBytes)
+				verifiedInstructionHashes[action.ID] = hashBytes(sourceBytes)
 			}
 			state, hasResolvedState := resolved[managedActionKey(action)]
-			rollback, err := mutateInstruction(paths, loaded, action, ownedInstructions[action.Target], sourceBytes, state, hasResolvedState)
+			rollback, err := mutateInstruction(paths, loaded, action, ownedInstructions[action.ID], sourceBytes, state, hasResolvedState)
 			rollbacks = append(rollbacks, rollback)
 			if err != nil {
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
@@ -709,28 +726,15 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			return !platformIncluded(platforms) || heldIDs[ItemID(kind, target, name)]
 		}
 		for _, loaded := range catalogs.list() {
-			for _, instruction := range loaded.Manifest.Instructions {
-				if !selectedInstruction(target, instruction.Target) || untouched("instruction", instruction.Target, "", instruction.Platforms) {
+			for _, item := range loaded.managedItems() {
+				if !selectedManaged(target, item.Kind, item.Target) || untouched(item.Kind, item.Target, item.Name, item.Platforms) || actionByID(result, item.id()).Action == "skip" {
 					continue
 				}
-				if actionFor(result, "instruction", instruction.Target).Action == "skip" {
-					continue
-				}
-				data, err := readVerifiedInstructionSource(loaded.Repository, instruction.Target, loaded.InstructionSources[instruction.Target], loaded.InstructionHashes[instruction.Target])
+				data, err := readVerifiedManagedSource(loaded.Repository, item.Kind, item.Target, item.Source, item.Hash)
 				if err != nil {
 					return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 				}
-				verifiedInstructionHashes[instruction.Target] = hashBytes(data)
-			}
-			for _, config := range loaded.Manifest.Configs {
-				if !selectedConfig(target, config.Target) || untouched("config", config.Target, "", config.Platforms) {
-					continue
-				}
-				data, err := readVerifiedManagedSource(loaded.Repository, "config", config.Target, loaded.ConfigSources[config.Target], loaded.ConfigHashes[config.Target])
-				if err != nil {
-					return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
-				}
-				verifiedInstructionHashes[config.Target] = hashBytes(data)
+				verifiedInstructionHashes[item.id()] = hashBytes(data)
 			}
 		}
 		now := time.Now().UTC()
@@ -741,7 +745,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			}
 		}
 		for _, old := range receipt.Managed {
-			if (old.Kind == "instruction" && !selectedInstruction(target, old.Target)) || (old.Kind == "config" && !selectedConfig(target, old.Target)) || heldIDs[ItemID(old.Kind, old.Target, "")] {
+			if !selectedManaged(target, old.Kind, old.Target) || heldIDs[ItemID(old.Kind, old.Target, old.Name)] {
 				newReceipt.Managed = append(newReceipt.Managed, old)
 			}
 		}
@@ -755,26 +759,27 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 					newReceipt.Projections = append(newReceipt.Projections, ReceiptProjection{Catalog: loaded.Manifest.ID, Skill: projection.Skill, Target: destinationTarget, Source: loaded.Sources[projection.Skill], Destination: destination, Strategy: "symlink", AppliedAt: now, TerranBuildVersion: buildVersion})
 				}
 			}
-			for _, instruction := range loaded.Manifest.Instructions {
-				if !selectedInstruction(target, instruction.Target) || untouched("instruction", instruction.Target, "", instruction.Platforms) {
+			for _, item := range loaded.managedItems() {
+				if !selectedManaged(target, item.Kind, item.Target) || untouched(item.Kind, item.Target, item.Name, item.Platforms) {
 					continue
 				}
-				if actionFor(result, "instruction", instruction.Target).Action == "skip" {
+				action := actionByID(result, item.id())
+				if action.Action == "skip" {
 					continue
 				}
-				prior, owned := ownedInstructions[instruction.Target]
+				destination, _ := managedFileDestination(paths, item.Kind, item.Target, item.Name)
+				prior, owned := ownedInstructions[item.id()]
 				origin := "created"
 				var originalHash, backup string
 				var originalMode uint32
 				if owned {
 					origin, originalHash, originalMode, backup = prior.Origin, prior.OriginalHash, prior.OriginalMode, prior.Backup
-				} else if action := actionFor(result, "instruction", instruction.Target); action.Action == "adopt" {
+				} else if action.Action == "adopt" {
 					origin = "adopted"
-					destination, _ := instructionDestination(paths, instruction.Target)
 					info, _ := os.Stat(destination)
-					originalHash = loaded.InstructionHashes[instruction.Target]
+					originalHash = item.Hash
 					originalMode = uint32(info.Mode().Perm())
-					backup = instructionBackup(paths, instruction.Target)
+					backup = managedBackup(paths, item.Kind, item.Target, item.Name)
 				} else if action.Action == "replace" {
 					state := resolved[managedActionKey(action)]
 					origin = "adopted"
@@ -782,53 +787,22 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 					originalMode = uint32(state.originalMode.Perm())
 					backup = state.backup
 				}
-				destination, _ := instructionDestination(paths, instruction.Target)
-				sourceHash := verifiedInstructionHashes[instruction.Target]
+				sourceHash := verifiedInstructionHashes[item.id()]
 				if sourceHash == "" {
-					sourceHash = loaded.InstructionHashes[instruction.Target]
+					sourceHash = item.Hash
 				}
-				newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: "instruction", Catalog: loaded.Manifest.ID, Target: instruction.Target, Source: loaded.InstructionSources[instruction.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
-			}
-			for _, config := range loaded.Manifest.Configs {
-				if !selectedConfig(target, config.Target) || untouched("config", config.Target, "", config.Platforms) {
-					continue
-				}
-				if actionFor(result, "config", config.Target).Action == "skip" {
-					continue
-				}
-				prior, owned := ownedInstructions[config.Target]
-				origin := "created"
-				var originalHash, backup string
-				var originalMode uint32
-				if owned {
-					origin, originalHash, originalMode, backup = prior.Origin, prior.OriginalHash, prior.OriginalMode, prior.Backup
-				} else if action := actionFor(result, "config", config.Target); action.Action == "adopt" {
-					origin = "adopted"
-					destination, _ := configDestination(paths, config.Target)
-					info, _ := os.Stat(destination)
-					originalHash = loaded.ConfigHashes[config.Target]
-					originalMode = uint32(info.Mode().Perm())
-					backup = instructionBackup(paths, config.Target)
-				} else if action.Action == "replace" {
-					state := resolved[managedActionKey(action)]
-					origin = "adopted"
-					originalHash = state.originalHash
-					originalMode = uint32(state.originalMode.Perm())
-					backup = state.backup
-				}
-				destination, _ := configDestination(paths, config.Target)
-				sourceHash := verifiedInstructionHashes[config.Target]
-				if sourceHash == "" {
-					sourceHash = loaded.ConfigHashes[config.Target]
-				}
-				newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: "config", Catalog: loaded.Manifest.ID, Target: config.Target, Source: loaded.ConfigSources[config.Target], Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
+				newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: item.Kind, Catalog: loaded.Manifest.ID, Target: item.Target, Name: item.Name, Source: item.Source, Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
 			}
 		}
 		sort.Slice(newReceipt.Projections, func(i, j int) bool {
 			return pairKey(newReceipt.Projections[i].Skill, newReceipt.Projections[i].Target) < pairKey(newReceipt.Projections[j].Skill, newReceipt.Projections[j].Target)
 		})
 		sort.Slice(newReceipt.Managed, func(i, j int) bool {
-			return pairKey(newReceipt.Managed[i].Kind, newReceipt.Managed[i].Target) < pairKey(newReceipt.Managed[j].Kind, newReceipt.Managed[j].Target)
+			a, b := newReceipt.Managed[i], newReceipt.Managed[j]
+			if pairKey(a.Kind, a.Target) != pairKey(b.Kind, b.Target) {
+				return pairKey(a.Kind, a.Target) < pairKey(b.Kind, b.Target)
+			}
+			return a.Name < b.Name
 		})
 		priorReceipt, _, priorReceiptErr := readTrustedFile(paths.Receipt, "receipt", 4<<20, 0o600)
 		priorReceiptExisted := priorReceiptErr == nil
@@ -868,7 +842,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			if action.Kind == "skill" || action.Action != "restore" {
 				continue
 			}
-			backup := instructionBackup(paths, action.Target)
+			backup := managedBackup(paths, action.Kind, action.Target, action.Name)
 			if receiptReferencesBackup(newReceipt, backup) {
 				continue
 			}
@@ -918,6 +892,15 @@ func appendReceiptWarning(plan *PlanResult, warning string) {
 	plan.Actions[0].Reason += warning
 }
 
+func actionByID(plan PlanResult, id string) Action {
+	for _, action := range plan.Actions {
+		if action.ID == id {
+			return action
+		}
+	}
+	return Action{}
+}
+
 func actionFor(plan PlanResult, kind, target string) Action {
 	for _, action := range plan.Actions {
 		if action.Kind == kind && action.Target == target {
@@ -938,7 +921,7 @@ func receiptReferencesBackup(receipt Receipt, backup string) bool {
 
 func appendActionWarning(plan *PlanResult, action Action, warning string) {
 	for i := range plan.Actions {
-		if plan.Actions[i].Kind == action.Kind && plan.Actions[i].Target == action.Target && plan.Actions[i].Skill == action.Skill {
+		if plan.Actions[i].ID == action.ID {
 			if plan.Actions[i].Reason != "" {
 				plan.Actions[i].Reason += "; "
 			}
@@ -999,21 +982,21 @@ func safelyRemoveInstructionBackup(path string) error {
 	return syncDirectory(filepath.Dir(path))
 }
 
-func managedActionKey(action Action) string { return action.Kind + "\x00" + action.Target }
+func managedActionKey(action Action) string { return action.ID }
 
 func resolvableCollision(paths Paths, loaded LoadedManifest, action Action) (resolvedCollision, bool) {
 	var state resolvedCollision
-	if (action.Kind != "instruction" && action.Kind != "config") || action.Action != "blocked_collision" {
+	if (action.Kind != "instruction" && action.Kind != "config" && action.Kind != "file") || action.Action != "blocked_collision" {
 		return state, false
 	}
 	if err := validateInstructionParent(action.Destination); err != nil {
 		return state, false
 	}
-	source, desired := managedSource(loaded, action.Kind, action.Target)
+	source, desired := managedItemSource(loaded, action.Kind, action.Target, action.Name)
 	if !desired || source != action.Source {
 		return state, false
 	}
-	sourceBytes, err := readVerifiedManagedSource(loaded.Repository, action.Kind, action.Target, source, managedHash(loaded, action.Kind, action.Target))
+	sourceBytes, err := readVerifiedManagedSource(loaded.Repository, action.Kind, action.Target, source, managedHash(loaded, action.Kind, action.Target, action.Name))
 	if err != nil {
 		return state, false
 	}
@@ -1025,7 +1008,7 @@ func resolvableCollision(paths Paths, loaded LoadedManifest, action Action) (res
 	if err != nil {
 		return state, false
 	}
-	state = resolvedCollision{destinationInfo: info, originalHash: hashBytes(original), originalMode: mode, backup: instructionBackup(paths, action.Target)}
+	state = resolvedCollision{destinationInfo: info, originalHash: hashBytes(original), originalMode: mode, backup: managedBackup(paths, action.Kind, action.Target, action.Name)}
 	if !safeBackupParent(paths, filepath.Dir(state.backup)) {
 		return resolvedCollision{}, false
 	}
@@ -1067,7 +1050,7 @@ func safeBackupParent(paths Paths, parent string) bool {
 }
 
 func preflightResolvedCollision(paths Paths, loaded LoadedManifest, action Action, expected resolvedCollision) error {
-	fresh, eligible := resolvableCollision(paths, loaded, Action{Kind: action.Kind, Action: "blocked_collision", Target: action.Target, Source: action.Source, Destination: action.Destination})
+	fresh, eligible := resolvableCollision(paths, loaded, Action{ID: action.ID, Kind: action.Kind, Action: "blocked_collision", Target: action.Target, Name: action.Name, Source: action.Source, Destination: action.Destination})
 	if !eligible || fresh.originalHash != expected.originalHash || fresh.originalMode != expected.originalMode || !os.SameFile(fresh.destinationInfo, expected.destinationInfo) {
 		return fmt.Errorf("managed-file collision changed during apply")
 	}
@@ -1113,23 +1096,23 @@ func preflightAction(paths Paths, catalogs Catalogs, action Action, ownedSkills 
 	if state, ok := resolved[managedActionKey(action)]; ok {
 		return preflightResolvedCollision(paths, loaded, action, state)
 	}
-	source, desired := managedSource(loaded, action.Kind, action.Target)
+	source, desired := managedItemSource(loaded, action.Kind, action.Target, action.Name)
 	if desired {
 		if err := validateTrustedInstructionSource(loaded.Repository, source); err != nil {
 			return err
 		}
-		data, err := readVerifiedManagedSource(loaded.Repository, action.Kind, action.Target, source, managedHash(loaded, action.Kind, action.Target))
+		data, err := readVerifiedManagedSource(loaded.Repository, action.Kind, action.Target, source, managedHash(loaded, action.Kind, action.Target, action.Name))
 		if err != nil {
 			return fmt.Errorf("managed source changed during apply: %w", err)
 		}
 		hash := hashBytes(data)
-		prior, owned := ownedInstructions[action.Target]
+		prior, owned := ownedInstructions[action.ID]
 		fresh, _ := classifyInstruction(paths, action, hash, prior, owned)
 		if fresh != action.Action {
 			return fmt.Errorf("instruction changed during apply")
 		}
 	} else {
-		fresh, _ := classifyInstructionRemoval(paths, ownedInstructions[action.Target], action.Destination)
+		fresh, _ := classifyInstructionRemoval(paths, ownedInstructions[action.ID], action.Destination)
 		if fresh != action.Action {
 			return fmt.Errorf("instruction changed during apply")
 		}
@@ -1258,7 +1241,7 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 				return rollback, fmt.Errorf("managed-file collision changed during apply")
 			}
 		}
-		backup := instructionBackup(paths, action.Target)
+		backup := managedBackup(paths, action.Kind, action.Target, action.Name)
 		if _, err := os.Lstat(backup); err == nil {
 			existing, _, err := readSafeFile(backup, "unreferenced instruction backup")
 			if err != nil {
@@ -1327,7 +1310,7 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 		}
 		mutation, err := atomicInstructionFile(action.Destination, verifiedSource, mode, action.Action == "create")
 		if mutation.mutated {
-			rollback.afterHash = managedHash(loaded, action.Kind, action.Target)
+			rollback.afterHash = managedHash(loaded, action.Kind, action.Target, action.Name)
 			rollback.afterInfo = mutation.info
 		}
 		if err != nil {
@@ -1341,7 +1324,7 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 		}
 		mutation, err := conditionalInstructionReplace(action, verifiedSource, mode, expected.destinationInfo, expected.originalHash, expected.originalMode, true)
 		if mutation.mutated {
-			rollback.afterHash = managedHash(loaded, action.Kind, action.Target)
+			rollback.afterHash = managedHash(loaded, action.Kind, action.Target, action.Name)
 			rollback.afterInfo = mutation.info
 		}
 		rollback.recovery = mutation.recovery
@@ -1356,7 +1339,7 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 		if err := validateBackup(paths, prior); err != nil {
 			return rollback, err
 		}
-		data, _, err := readSafeFile(instructionBackup(paths, action.Target), "instruction backup")
+		data, _, err := readSafeFile(managedBackup(paths, action.Kind, action.Target, action.Name), "instruction backup")
 		if err != nil {
 			return rollback, err
 		}
@@ -1370,10 +1353,6 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 		}
 	}
 	return rollback, nil
-}
-
-func readVerifiedInstructionSource(repository, target, source, expectedHash string) ([]byte, error) {
-	return readVerifiedManagedSource(repository, "instruction", target, source, expectedHash)
 }
 
 func readVerifiedManagedSource(repository, kind, target, source, expectedHash string) ([]byte, error) {
@@ -1402,25 +1381,38 @@ func readVerifiedManagedSource(repository, kind, target, source, expectedHash st
 	return data, nil
 }
 
+// managedSource looks up an unnamed instruction or config source.
 func managedSource(loaded LoadedManifest, kind, target string) (string, bool) {
-	if kind == "config" {
-		source, ok := loaded.ConfigSources[target]
-		return source, ok
+	return managedItemSource(loaded, kind, target, "")
+}
+
+func managedItemSource(loaded LoadedManifest, kind, target, name string) (string, bool) {
+	var source string
+	var ok bool
+	switch kind {
+	case "config":
+		source, ok = loaded.ConfigSources[target]
+	case "file":
+		source, ok = loaded.FileSources[ItemID(kind, target, name)]
+	default:
+		source, ok = loaded.InstructionSources[target]
 	}
-	source, ok := loaded.InstructionSources[target]
 	return source, ok
 }
 
-func managedHash(loaded LoadedManifest, kind, target string) string {
-	if kind == "config" {
+func managedHash(loaded LoadedManifest, kind, target, name string) string {
+	switch kind {
+	case "config":
 		return loaded.ConfigHashes[target]
+	case "file":
+		return loaded.FileHashes[ItemID(kind, target, name)]
 	}
 	return loaded.InstructionHashes[target]
 }
 
-func managedSourceHash(loaded LoadedManifest, kind, target string) (string, bool) {
-	_, ok := managedSource(loaded, kind, target)
-	return managedHash(loaded, kind, target), ok
+func managedSourceHash(loaded LoadedManifest, kind, target, name string) (string, bool) {
+	_, ok := managedItemSource(loaded, kind, target, name)
+	return managedHash(loaded, kind, target, name), ok
 }
 
 func rollbackInstructions(rollbacks []instructionRollback) error {

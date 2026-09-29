@@ -1065,3 +1065,397 @@ func TestHeldOwnedInstructionRemovedFromCatalogStaysUntouched(t *testing.T) {
 		t.Fatalf("unheld plan: %#v", plan)
 	}
 }
+
+func fileEnvironment(t *testing.T) (string, string) {
+	t.Helper()
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("CODEX_HOME", "")
+	return home, filepath.Join(base, "repo")
+}
+
+// writeCatalogWithFiles writes a catalog whose instruction and file sources
+// contain "# <target or name>\n".
+func writeCatalogWithFiles(t *testing.T, repo, id string, instructions []Instruction, files []FileItem) {
+	t.Helper()
+	write := func(source, content string) {
+		path := filepath.Join(repo, filepath.FromSlash(source))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, instruction := range instructions {
+		write(instruction.Source, "# "+instruction.Target+"\n")
+	}
+	for _, file := range files {
+		write(file.Source, "# "+file.Name+"\n")
+	}
+	manifest := Manifest{SchemaVersion: SchemaVersion, ID: id, Version: "0.1.0", Projections: []Projection{}, Instructions: instructions, Files: files}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "terran.json"), append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func actionByIDOrFail(t *testing.T, plan PlanResult, id string) Action {
+	t.Helper()
+	action := actionByID(plan, id)
+	if action.ID == "" {
+		t.Fatalf("no action %s in %#v", id, plan)
+	}
+	return action
+}
+
+func TestCodexHomeAndMiseDestinations(t *testing.T) {
+	home, _ := fileEnvironment(t)
+	paths, err := ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"codex-global": filepath.Join(home, ".codex", "AGENTS.md"),
+		"mise-config":  filepath.Join(home, "config", "mise", "config.toml"),
+		"mise-lock":    filepath.Join(home, "config", "mise", "mise.lock"),
+	}
+	for target, destination := range want {
+		kind := "config"
+		if target == "codex-global" {
+			kind = "instruction"
+		}
+		if got, err := managedFileDestination(paths, kind, target, ""); err != nil || got != destination {
+			t.Fatalf("%s destination %q %v, want %q", target, got, err, destination)
+		}
+	}
+	codexHome := filepath.Join(home, "elsewhere", "codex")
+	t.Setenv("CODEX_HOME", codexHome+"/")
+	paths, err = ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := instructionDestination(paths, "codex-global"); got != filepath.Join(codexHome, "AGENTS.md") {
+		t.Fatalf("CODEX_HOME destination %q", got)
+	}
+	t.Setenv("CODEX_HOME", "relative/codex")
+	if _, err := ResolvePaths(); err == nil {
+		t.Fatal("relative CODEX_HOME accepted")
+	}
+}
+
+func TestCodexGlobalCreateAdoptDriftAndRestore(t *testing.T) {
+	codex := []Instruction{{Target: "codex-global", Source: "instructions/codex.md"}}
+	t.Run("created", func(t *testing.T) {
+		home, repo := fileEnvironment(t)
+		codexHome := filepath.Join(home, "codex home")
+		t.Setenv("CODEX_HOME", codexHome)
+		writeCatalogWithFiles(t, repo, "test-catalog", codex, nil)
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
+			t.Fatal(err)
+		}
+		if plan, err := Plan("codex"); err != nil || len(plan.Actions) != 1 || actionCount(plan, "create") != 1 {
+			t.Fatalf("create plan: %#v %v", plan, err)
+		}
+		if _, err := Apply("codex", "test"); err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(codexHome, "AGENTS.md")
+		if data, _ := os.ReadFile(destination); string(data) != "# codex-global\n" || fileMode(t, destination) != 0o644 {
+			t.Fatalf("codex instruction not created: %q", data)
+		}
+		if err := os.WriteFile(destination, []byte("external edit"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if plan, _ := Plan("all"); actionCount(plan, "blocked_drift") != 1 {
+			t.Fatalf("drift not blocked: %#v", plan)
+		}
+	})
+	t.Run("adopted", func(t *testing.T) {
+		home, repo := fileEnvironment(t)
+		writeCatalogWithFiles(t, repo, "test-catalog", codex, nil)
+		destination := filepath.Join(home, ".codex", "AGENTS.md")
+		original := []byte("# codex-global\n")
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(destination, original, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
+			t.Fatal(err)
+		}
+		if plan, err := Plan("codex"); err != nil || actionCount(plan, "adopt") != 1 {
+			t.Fatalf("adopt plan: %#v %v", plan, err)
+		}
+		if _, err := Apply("codex", "test"); err != nil {
+			t.Fatal(err)
+		}
+		paths, _ := ResolvePaths()
+		if data, err := os.ReadFile(instructionBackup(paths, "codex-global")); err != nil || !bytes.Equal(data, original) {
+			t.Fatalf("adoption backup: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "instructions", "codex.md"), []byte("# managed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Apply("codex", "test"); err != nil {
+			t.Fatal(err)
+		}
+		writeCatalogWithFiles(t, repo, "test-catalog", nil, nil)
+		if plan, err := Plan("codex"); err != nil || actionCount(plan, "restore") != 1 {
+			t.Fatalf("restore plan: %#v %v", plan, err)
+		}
+		if _, err := Apply("codex", "test"); err != nil {
+			t.Fatal(err)
+		}
+		if data, _ := os.ReadFile(destination); !bytes.Equal(data, original) || fileMode(t, destination) != 0o640 {
+			t.Fatalf("adopted codex instruction not restored: %q", data)
+		}
+	})
+}
+
+func TestNamedFileNamesRejectedAtManifestLoad(t *testing.T) {
+	for _, name := range []string{"../x", "a/b", "Agent.md", "x.txt", "a..md", ".md"} {
+		t.Run(name, func(t *testing.T) {
+			_, repo := fileEnvironment(t)
+			writeCatalogWithFiles(t, repo, "test-catalog", nil, []FileItem{{Target: "claude-agent", Name: "ok.md", Source: "files/agent.md"}})
+			data, _ := os.ReadFile(filepath.Join(repo, "terran.json"))
+			data = bytes.Replace(data, []byte(`"ok.md"`), []byte(`"`+name+`"`), 1)
+			if err := os.WriteFile(filepath.Join(repo, "terran.json"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadManifest(repo); err == nil {
+				t.Fatalf("file name %q accepted", name)
+			}
+		})
+	}
+	_, repo := fileEnvironment(t)
+	writeCatalogWithFiles(t, repo, "test-catalog", nil, []FileItem{{Target: "opencode-tool", Name: "x.js", Source: "files/x.js"}})
+	if _, err := LoadManifest(repo); err == nil {
+		t.Fatal("opencode-tool accepted a .js name")
+	}
+	writeCatalogWithFiles(t, repo, "test-catalog", nil, []FileItem{{Target: "claude-agent", Name: "a.md", Source: "files/a.md"}, {Target: "claude-agent", Name: "a.md", Source: "files/b.md"}})
+	if _, err := LoadManifest(repo); err == nil {
+		t.Fatal("duplicate file accepted")
+	}
+}
+
+func TestNamedFilesModesIndependenceAndReceipt(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	files := []FileItem{
+		{Target: "claude-agent", Name: "a.md", Source: "files/a.md"},
+		{Target: "claude-agent", Name: "b.md", Source: "files/b.md"},
+		{Target: "claude-hook", Name: "pre-tool.sh", Source: "files/pre-tool.sh"},
+		{Target: "opencode-plugin", Name: "p.ts", Source: "files/p.ts"},
+	}
+	writeCatalogWithFiles(t, repo, "test-catalog", nil, files)
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Plan("all")
+	if err != nil || actionCount(plan, "create") != 4 {
+		t.Fatalf("create plan: %#v %v", plan, err)
+	}
+	if action := actionByIDOrFail(t, plan, "file/claude-agent/a.md"); action.Name != "a.md" || action.Destination != filepath.Join(home, ".claude", "agents", "a.md") {
+		t.Fatalf("file action: %#v", action)
+	}
+	if plan, _ := Plan("opencode"); len(plan.Actions) != 1 || plan.Actions[0].Target != "opencode-plugin" {
+		t.Fatalf("opencode filter: %#v", plan)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	agentA := filepath.Join(home, ".claude", "agents", "a.md")
+	agentB := filepath.Join(home, ".claude", "agents", "b.md")
+	hook := filepath.Join(home, ".claude", "hooks", "pre-tool.sh")
+	plugin := filepath.Join(home, "config", "opencode", "plugins", "p.ts")
+	for path, mode := range map[string]os.FileMode{agentA: 0o644, agentB: 0o644, hook: 0o755, plugin: 0o644} {
+		if got := fileMode(t, path); got != mode {
+			t.Fatalf("%s mode %04o, want %04o", path, got, mode)
+		}
+	}
+	paths, _ := ResolvePaths()
+	receipt, err := LoadReceipt(paths, Enrollment{})
+	if err != nil || len(receipt.Managed) != 4 {
+		t.Fatalf("receipt: %#v %v", receipt, err)
+	}
+	for _, managed := range receipt.Managed {
+		if managed.Kind != "file" || managed.Name == "" || managed.Catalog != "test-catalog" || managed.Origin != "created" {
+			t.Fatalf("file receipt entry: %#v", managed)
+		}
+	}
+	if plan, _ := Plan("all"); !plan.Clean || actionCount(plan, "noop") != 4 {
+		t.Fatalf("noop plan: %#v", plan)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "files", "a.md"), []byte("# a changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agentB, []byte("external edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hook, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, _ = Plan("all")
+	if actionByIDOrFail(t, plan, "file/claude-agent/a.md").Action != "update" || actionByIDOrFail(t, plan, "file/claude-agent/b.md").Action != "blocked_drift" || actionByIDOrFail(t, plan, "file/claude-hook/pre-tool.sh").Action != "blocked_drift" || actionByIDOrFail(t, plan, "file/opencode-plugin/p.ts").Action != "noop" {
+		t.Fatalf("independent file actions: %#v", plan)
+	}
+	if err := os.WriteFile(agentB, []byte("# b.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(agentA); string(data) != "# a changed\n" {
+		t.Fatalf("a.md not updated: %q", data)
+	}
+	if doctor := Doctor("0.1.0"); !doctorCheck(doctor, "file_receipt", "ok") || !doctorCheck(doctor, "file_claude-hook/pre-tool.sh", "ok") {
+		t.Fatalf("doctor: %#v", doctor)
+	}
+	writeCatalogWithFiles(t, repo, "test-catalog", nil, files[1:])
+	plan, _ = Plan("all")
+	if actionByIDOrFail(t, plan, "file/claude-agent/a.md").Action != "remove" || actionCount(plan, "noop") != 3 {
+		t.Fatalf("removal plan: %#v", plan)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(agentA); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("created file was not removed")
+	}
+	if _, err := os.Lstat(agentB); err != nil {
+		t.Fatal("sibling file was removed")
+	}
+}
+
+func doctorCheck(result DoctorResult, name, status string) bool {
+	for _, check := range result.Checks {
+		if check.Name == name {
+			return check.Status == status
+		}
+	}
+	return false
+}
+
+func TestNamedFileCollisionAdoptRestoreAndOverlay(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	writeCatalogWithFiles(t, repo, "test-catalog", nil, []FileItem{{Target: "claude-command", Name: "c.md", Source: "files/c.md"}, {Target: "claude-hook", Name: "h", Source: "files/h"}, {Target: "claude-agent", Name: "a.md", Source: "files/a.md"}})
+	overlay := filepath.Join(filepath.Dir(repo), "overlay")
+	writeCatalogWithFiles(t, overlay, "private", nil, []FileItem{{Target: "opencode-command", Name: "o.md", Source: "files/o.md"}})
+	overlay, _ = filepath.EvalSymlinks(overlay)
+	command := filepath.Join(home, ".claude", "commands", "c.md")
+	hook := filepath.Join(home, ".claude", "hooks", "h")
+	agent := filepath.Join(home, ".claude", "agents", "a.md")
+	for path, content := range map[string]string{command: "unowned", hook: "# h\n", agent: "# a.md\n"} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	enrollment, _, err := Enroll(repo, "test", overlay, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Plan("all")
+	if err != nil || actionByIDOrFail(t, plan, "file/claude-command/c.md").Action != "blocked_collision" || actionByIDOrFail(t, plan, "file/claude-hook/h").Action != "blocked_collision" || actionByIDOrFail(t, plan, "file/claude-agent/a.md").Action != "adopt" || actionByIDOrFail(t, plan, "file/opencode-command/o.md").Catalog != "private" {
+		t.Fatalf("collision plan: %#v %v", plan, err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(command); string(data) != "unowned" {
+		t.Fatal("blocked apply changed an unowned file")
+	}
+	if err := os.Remove(command); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := ResolvePaths()
+	backup := filepath.Join(paths.BackupDir, "file", "claude-agent", "a.md", "original")
+	if data, err := os.ReadFile(backup); err != nil || string(data) != "# a.md\n" || fileMode(t, backup) != 0o600 {
+		t.Fatalf("per-item backup: %v", err)
+	}
+	receipt, err := LoadReceipt(paths, enrollment)
+	if err != nil || len(receipt.Managed) != 4 {
+		t.Fatalf("receipt: %#v %v", receipt, err)
+	}
+	for _, managed := range receipt.Managed {
+		want := "test-catalog"
+		if managed.Target == "opencode-command" {
+			want = "private"
+		}
+		if managed.Catalog != want {
+			t.Fatalf("receipt catalog: %#v", managed)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "files", "a.md"), []byte("# managed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogWithFiles(t, repo, "test-catalog", nil, nil)
+	writeCatalogWithFiles(t, overlay, "private", nil, nil)
+	plan, _ = Plan("all")
+	if actionByIDOrFail(t, plan, "file/claude-agent/a.md").Action != "restore" || actionByIDOrFail(t, plan, "file/claude-hook/h").Action != "restore" || actionByIDOrFail(t, plan, "file/opencode-command/o.md").Action != "remove" {
+		t.Fatalf("removal plan: %#v", plan)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(agent); string(data) != "# a.md\n" || fileMode(t, agent) != 0o600 {
+		t.Fatalf("adopted file not restored: %q", data)
+	}
+	if _, err := os.Lstat(backup); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restored backup not removed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, "config", "opencode", "command", "o.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("overlay file not removed")
+	}
+}
+
+func TestNamedFileNeverFollowsSymlinkedParent(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	writeCatalogWithFiles(t, repo, "test-catalog", nil, []FileItem{{Target: "claude-hook", Name: "h", Source: "files/h"}})
+	elsewhere := filepath.Join(home, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(home, ".claude", "hooks")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if plan, err := Plan("claude"); err != nil || actionCount(plan, "blocked_collision") != 1 {
+		t.Fatalf("symlinked parent not blocked: %#v %v", plan, err)
+	}
+	if _, err := Apply("claude", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Fatal("apply wrote through a symlinked parent")
+	}
+}

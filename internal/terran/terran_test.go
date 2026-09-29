@@ -24,6 +24,7 @@ func testEnvironment(t *testing.T) (home, repo string) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	t.Setenv("CODEX_HOME", "")
 	writeCatalog(t, repo, []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}}})
 	return home, repo
 }

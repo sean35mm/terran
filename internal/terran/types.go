@@ -110,6 +110,7 @@ type Action struct {
 	Catalog     string `json:"catalog"`
 	Skill       string `json:"skill,omitempty"`
 	Target      string `json:"target"`
+	Name        string `json:"name,omitempty"`
 	Source      string `json:"source"`
 	Destination string `json:"destination"`
 	Reason      string `json:"reason,omitempty"`
@@ -141,6 +142,7 @@ type StatusItem struct {
 	Kind        string `json:"kind"`
 	Skill       string `json:"skill,omitempty"`
 	Target      string `json:"target"`
+	Name        string `json:"name,omitempty"`
 	Status      string `json:"status"`
 	Source      string `json:"source"`
 	Destination string `json:"destination"`

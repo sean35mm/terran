@@ -171,6 +171,9 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 			for _, item := range result.Items {
 				name := item.Skill
 				if name == "" {
+					name = item.Name
+				}
+				if name == "" {
 					name = item.Target
 				}
 				fmt.Fprintf(stdout, "%-10s %-11s %-16s %s\n", item.Status, item.Kind, item.Target, name)
@@ -205,6 +208,9 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 				reason = "-"
 			}
 			name := action.Skill
+			if name == "" {
+				name = action.Name
+			}
 			if name == "" {
 				name = action.Target
 			}
@@ -409,7 +415,7 @@ func printCommandIntro(w io.Writer, command string) {
 		"version": "Usage: terran version [--json]\nRead-only. Prints build metadata. Exit: 0 success, 1 output failure, 2 usage.\n\nFlags:",
 		"enroll":  "Usage: terran enroll --repo PATH [--name NAME] [--overlay PATH] [--replace] [--json]\nMutates private enrollment state; it never creates skill links, instruction files, or config files. Re-enrolling the same repository may rename it or add an overlay and keeps holds. Changing or dropping an overlay that still owns applied items fails with repository_mismatch. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
 		"plan":    "Usage: terran plan [--target " + targets + "] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
-		"apply":   "Usage: terran apply [--target " + targets + "] [--json]\nMutates only validated skill leaves, fixed instruction/config files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
+		"apply":   "Usage: terran apply [--target " + targets + "] [--json]\nMutates only validated skill leaves, fixed instruction/config files, named files in fixed directories, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"status":  "Usage: terran status [--target " + targets + "] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
 		"hold":    "Usage: terran hold ITEM_ID [--json]\nMutates private enrollment state only. Pins an item id from terran plan --json so plan and apply never inspect or change it. Exit: 0 success, 1 operational failure (including unknown_item), 2 usage.\n\nFlags:",
 		"unhold":  "Usage: terran unhold ITEM_ID [--json]\nMutates private enrollment state only. Releases a held item; releasing an item that is not held succeeds. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",

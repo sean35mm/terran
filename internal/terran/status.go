@@ -17,7 +17,7 @@ func Status(target string) (StatusResult, error) {
 	}
 	result := StatusResult{SchemaVersion: SchemaVersion, Clean: true}
 	for _, action := range plan.Actions {
-		item := StatusItem{ID: action.ID, Kind: action.Kind, Skill: action.Skill, Target: action.Target, Source: action.Source, Destination: action.Destination, Detail: action.Reason}
+		item := StatusItem{ID: action.ID, Kind: action.Kind, Skill: action.Skill, Target: action.Target, Name: action.Name, Source: action.Source, Destination: action.Destination, Detail: action.Reason}
 		switch action.Action {
 		case "noop":
 			item.Status = "ok"
@@ -134,6 +134,18 @@ func Doctor(buildVersion string) DoctorResult {
 		add("instruction_receipt", "fail", err.Error())
 		add("config_receipt", "fail", err.Error())
 	} else {
+		fileHealthy, files := true, false
+		for _, managed := range receipt.Managed {
+			if managed.Kind == "file" {
+				files = true
+				if !held[ItemID(managed.Kind, managed.Target, managed.Name)] && !doctorManagedFile(paths, enrollment, managed.Kind, managed, add) {
+					fileHealthy = false
+				}
+			}
+		}
+		if files && fileHealthy {
+			add("file_receipt", "ok", "file receipt paths, hashes, modes, and backups are valid")
+		}
 		instructionHealthy := true
 		for _, managed := range receipt.Managed {
 			if managed.Kind == "instruction" && !held[ItemID(managed.Kind, managed.Target, "")] && !doctorManagedFile(paths, enrollment, managed.Kind, managed, add) {
@@ -178,8 +190,8 @@ func Doctor(buildVersion string) DoctorResult {
 }
 
 func doctorManagedFile(paths Paths, enrollment Enrollment, kind string, managed ReceiptManaged, add func(string, string, string)) bool {
-	name := kind + "_" + managed.Target
-	destination, destinationErr := managedFileDestination(paths, kind, managed.Target)
+	name := kind + "_" + managedLabel(managed.Target, managed.Name)
+	destination, destinationErr := managedFileDestination(paths, kind, managed.Target, managed.Name)
 	if destinationErr != nil || destination != managed.Destination || contained(enrollment.RepositoryPath, destination) || (enrollment.OverlayPath != "" && contained(enrollment.OverlayPath, destination)) {
 		add(name, "fail", "fixed "+kind+" destination is invalid")
 		return false
@@ -195,6 +207,10 @@ func doctorManagedFile(paths Paths, enrollment Enrollment, kind string, managed 
 	hash, err := fileHash(destination)
 	if err != nil || hash != managed.AppliedHash {
 		add(name, "fail", "managed "+kind+" hash mismatch")
+		return false
+	}
+	if err := validateExecutableMode(kind, managed.Target, destination); err != nil {
+		add(name, "fail", err.Error())
 		return false
 	}
 	if managed.Origin == "adopted" {

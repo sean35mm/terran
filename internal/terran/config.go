@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var envReferencePattern = regexp.MustCompile(`^\{env:[A-Z][A-Z0-9_]*\}$`)
@@ -33,6 +34,30 @@ func validateOpenCodeConfig(data []byte) error {
 		return fmt.Errorf("config has trailing JSON: %w", err)
 	}
 	return validateConfigValue(value, "", "$")
+}
+
+// validateTextConfig screens a line-oriented text config such as TOML without
+// parsing it: public, bounded UTF-8 text with no machine paths or
+// credential-like keys.
+func validateTextConfig(data []byte) error {
+	if len(data) > instructionLimit {
+		return fmt.Errorf("config exceeds %d bytes", instructionLimit)
+	}
+	if !utf8.Valid(data) {
+		return fmt.Errorf("config must be valid UTF-8")
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return fmt.Errorf("config must not contain NUL bytes")
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		if containsAbsoluteMachinePath(line) {
+			return fmt.Errorf("absolute machine path is not allowed on line %d", i+1)
+		}
+		if key, _, found := strings.Cut(line, "="); found && credentialKey(strings.Trim(strings.TrimSpace(key), `"'`)) {
+			return fmt.Errorf("credential-like key is not allowed on line %d", i+1)
+		}
+	}
+	return nil
 }
 
 func decodeUniqueJSONValue(dec *json.Decoder, path string) (any, error) {

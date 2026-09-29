@@ -28,6 +28,8 @@ type LoadedManifest struct {
 	InstructionHashes  map[string]string
 	ConfigSources      map[string]string
 	ConfigHashes       map[string]string
+	FileSources        map[string]string // keyed by ItemID
+	FileHashes         map[string]string // keyed by ItemID
 }
 
 func LoadManifest(repo string) (loaded LoadedManifest, err error) {
@@ -73,6 +75,8 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	instructionHashes := make(map[string]string)
 	configSources := make(map[string]string)
 	configHashes := make(map[string]string)
+	fileSources := make(map[string]string)
+	fileHashes := make(map[string]string)
 	pairs := make(map[string]bool)
 	for i := range manifest.Projections {
 		p := &manifest.Projections[i]
@@ -215,13 +219,39 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	sort.Slice(manifest.Configs, func(i, j int) bool { return manifest.Configs[i].Target < manifest.Configs[j].Target })
 	for i := range manifest.Files {
 		file := &manifest.Files[i]
-		if _, ok := lookupTarget("file", file.Target); !ok {
+		spec, ok := lookupTarget("file", file.Target)
+		if !ok {
 			return LoadedManifest{}, fmt.Errorf("unsupported file target %q", file.Target)
 		}
 		if err := validatePlatforms(file.Platforms); err != nil {
 			return LoadedManifest{}, fmt.Errorf("platforms for file %s/%s: %w", file.Target, file.Name, err)
 		}
 		sort.Strings(file.Platforms)
+		if err := validateFileName(spec, file.Name); err != nil {
+			return LoadedManifest{}, err
+		}
+		id := ItemID("file", file.Target, file.Name)
+		if _, exists := fileSources[id]; exists {
+			return LoadedManifest{}, fmt.Errorf("duplicate file %s/%s", file.Target, file.Name)
+		}
+		if file.Source == "" || filepath.IsAbs(file.Source) || filepath.Clean(file.Source) != file.Source || file.Source == "." || strings.HasPrefix(file.Source, ".."+string(filepath.Separator)) {
+			return LoadedManifest{}, fmt.Errorf("source for file %s/%s must be a clean relative path", file.Target, file.Name)
+		}
+		sourcePath := filepath.Join(canonicalRepo, file.Source)
+		canonicalSource, err := filepath.EvalSymlinks(sourcePath)
+		if err != nil || canonicalSource != sourcePath || !contained(canonicalRepo, canonicalSource) {
+			return LoadedManifest{}, fmt.Errorf("source for file %s/%s is missing or escapes repository", file.Target, file.Name)
+		}
+		if err := validateTrustedInstructionSource(canonicalRepo, canonicalSource); err != nil {
+			return LoadedManifest{}, fmt.Errorf("source for file %s/%s: %w", file.Target, file.Name, err)
+		}
+		data, _, err := readTrustedFile(canonicalSource, "file source", instructionLimit, 0)
+		if err != nil {
+			return LoadedManifest{}, fmt.Errorf("source for file %s/%s: %w", file.Target, file.Name, err)
+		}
+		sum := sha256.Sum256(data)
+		fileSources[id] = canonicalSource
+		fileHashes[id] = hex.EncodeToString(sum[:])
 	}
 	sort.Slice(manifest.Files, func(i, j int) bool {
 		if manifest.Files[i].Target != manifest.Files[j].Target {
@@ -261,7 +291,7 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	sort.Slice(manifest.Tools, func(i, j int) bool { return manifest.Tools[i].Name < manifest.Tools[j].Name })
 	normalized, _ := json.Marshal(manifest)
 	sum := sha256.Sum256(normalized)
-	return LoadedManifest{manifest, canonicalRepo, hex.EncodeToString(sum[:]), sources, instructionSources, instructionHashes, configSources, configHashes}, nil
+	return LoadedManifest{manifest, canonicalRepo, hex.EncodeToString(sum[:]), sources, instructionSources, instructionHashes, configSources, configHashes, fileSources, fileHashes}, nil
 }
 
 func validatePlatforms(platforms []string) error {

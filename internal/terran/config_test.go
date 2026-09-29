@@ -519,3 +519,41 @@ func TestConfigRollbackAndEnrollmentReplacement(t *testing.T) {
 		t.Fatalf("managed config enrollment replacement accepted: %v", err)
 	}
 }
+
+func TestValidateTextConfig(t *testing.T) {
+	rejected := map[string][]byte{
+		"nul":           []byte("[tools]\nnode = \"lts\"\x00\n"),
+		"bad utf8":      []byte("[tools]\nnode = \"\xff\"\n"),
+		"darwin home":   []byte("[settings]\ncache = \"/Users/alice/x\"\n"),
+		"linux home":    []byte("[settings]\ncache = \"/home/bob/x\"\n"),
+		"api key":       []byte("[env]\napi_key = \"x\"\n"),
+		"token":         []byte("token=\"y\"\n"),
+		"quoted secret": []byte("\"client_secret\" = \"z\"\n"),
+		"oversize":      append([]byte("# "), make([]byte, instructionLimit)...),
+	}
+	for name, data := range rejected {
+		if err := validateTextConfig(data); err == nil {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+	valid := "[tools]\nnode = \"lts\"\ngo = \"1.24\"\n\n[settings]\nexperimental = true\n\n[tools.\"aqua:cli/cli\"]\nurl = \"https://github.com/cli/cli\"\n"
+	if err := validateTextConfig([]byte(valid)); err != nil {
+		t.Fatalf("normal mise config rejected: %v", err)
+	}
+
+	_, repo := configEnvironment(t, false)
+	source := filepath.Join(repo, "config", "mise.toml")
+	if err := os.WriteFile(source, []byte("[tools]\nnode = \"lts\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogWithConfigs(t, repo, nil, []Config{{Target: "mise-config", Source: "config/mise.toml"}})
+	if _, err := LoadManifest(repo); err != nil {
+		t.Fatalf("mise config rejected at load: %v", err)
+	}
+	if err := os.WriteFile(source, []byte("[env]\ngithub_token = \"x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadManifest(repo); err == nil {
+		t.Fatal("credential-bearing mise config accepted at load")
+	}
+}

@@ -17,6 +17,7 @@ type Paths struct {
 	ConfigFile string
 	Receipt    string
 	Lock       string
+	CodexHome  string
 }
 
 func ResolvePaths() (Paths, error) {
@@ -35,9 +36,16 @@ func ResolvePaths() (Paths, error) {
 	if !filepath.IsAbs(configBase) || !filepath.IsAbs(stateBase) {
 		return Paths{}, fmt.Errorf("HOME and XDG paths must be absolute")
 	}
+	codexHome := os.Getenv("CODEX_HOME")
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	if !filepath.IsAbs(codexHome) {
+		return Paths{}, fmt.Errorf("CODEX_HOME must be an absolute path")
+	}
 	configDir := filepath.Join(filepath.Clean(configBase), "terran")
 	stateDir := filepath.Join(filepath.Clean(stateBase), "terran")
-	return Paths{home, filepath.Clean(configBase), filepath.Clean(stateBase), configDir, stateDir, filepath.Join(stateDir, "backups"), filepath.Join(configDir, "config.json"), filepath.Join(stateDir, "receipt.json"), filepath.Join(stateDir, "lock")}, nil
+	return Paths{home, filepath.Clean(configBase), filepath.Clean(stateBase), configDir, stateDir, filepath.Join(stateDir, "backups"), filepath.Join(configDir, "config.json"), filepath.Join(stateDir, "receipt.json"), filepath.Join(stateDir, "lock"), filepath.Clean(codexHome)}, nil
 }
 
 func instructionDestination(paths Paths, target string) (string, error) {
@@ -56,19 +64,35 @@ func configDestination(paths Paths, target string) (string, error) {
 	return spec.Dest(paths, "")
 }
 
-func managedFileDestination(paths Paths, kind, target string) (string, error) {
+func managedFileDestination(paths Paths, kind, target, name string) (string, error) {
 	spec, ok := lookupTarget(kind, target)
 	if !ok {
-		if kind == "config" {
-			return "", fmt.Errorf("unsupported config target %q", target)
+		if kind == "config" || kind == "file" {
+			return "", fmt.Errorf("unsupported %s target %q", kind, target)
 		}
 		return "", fmt.Errorf("unsupported instruction target %q", target)
 	}
-	return spec.Dest(paths, "")
+	if kind == "file" {
+		if err := validateFileName(spec, name); err != nil {
+			return "", err
+		}
+	} else if name != "" {
+		return "", fmt.Errorf("%s target %q does not take a name", kind, target)
+	}
+	return spec.Dest(paths, name)
 }
 
 func instructionBackup(paths Paths, target string) string {
 	return filepath.Join(paths.BackupDir, target, "original")
+}
+
+// managedBackup keeps instruction and config backups at their v0.3 paths;
+// named files get one backup directory per item.
+func managedBackup(paths Paths, kind, target, name string) string {
+	if kind == "file" {
+		return filepath.Join(paths.BackupDir, kind, target, name, "original")
+	}
+	return instructionBackup(paths, target)
 }
 
 func targetRoot(home, target string) (string, error) {
