@@ -110,7 +110,7 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 			return LoadedManifest{}, fmt.Errorf("skill %s has no targets", p.Skill)
 		}
 		for _, target := range p.Targets {
-			if target != "agents" && target != "claude" {
+			if _, ok := lookupTarget("skill", target); !ok {
 				return LoadedManifest{}, fmt.Errorf("unsupported target %q", target)
 			}
 			key := p.Skill + "\x00" + target
@@ -133,7 +133,7 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	})
 	for i := range manifest.Instructions {
 		instruction := &manifest.Instructions[i]
-		if instruction.Target != "claude-global" && instruction.Target != "opencode-global" {
+		if _, ok := lookupTarget("instruction", instruction.Target); !ok {
 			return LoadedManifest{}, fmt.Errorf("unsupported instruction target %q", instruction.Target)
 		}
 		if _, exists := instructionSources[instruction.Target]; exists {
@@ -164,7 +164,7 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	sort.Slice(manifest.Instructions, func(i, j int) bool { return manifest.Instructions[i].Target < manifest.Instructions[j].Target })
 	for i := range manifest.Configs {
 		config := &manifest.Configs[i]
-		if config.Target != "opencode-config" && config.Target != "naru-runtime" {
+		if _, ok := lookupTarget("config", config.Target); !ok {
 			return LoadedManifest{}, fmt.Errorf("unsupported config target %q", config.Target)
 		}
 		if _, exists := configSources[config.Target]; exists {
@@ -188,8 +188,11 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 		if len(data) > instructionLimit {
 			return LoadedManifest{}, fmt.Errorf("source for %s exceeds %d bytes", config.Target, instructionLimit)
 		}
-		if err := validateOpenCodeConfig(data); err != nil {
-			return LoadedManifest{}, fmt.Errorf("source for %s: %w", config.Target, err)
+		spec, _ := lookupTarget("config", config.Target)
+		if spec.Validate != nil {
+			if err := spec.Validate(data); err != nil {
+				return LoadedManifest{}, fmt.Errorf("source for %s: %w", config.Target, err)
+			}
 		}
 		sum := sha256.Sum256(data)
 		configSources[config.Target] = canonicalSource

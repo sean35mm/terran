@@ -15,22 +15,22 @@ import (
 )
 
 func validateTarget(target string) error {
-	if target != "all" && target != "agents" && target != "claude" && target != "opencode" {
-		return fmt.Errorf("target must be all, agents, claude, or opencode")
-	}
-	return nil
+	return ValidateTarget(target)
 }
 
 func selectedSkill(filter, target string) bool {
-	return filter == "all" || filter == target
+	spec, ok := lookupTarget("skill", target)
+	return filter == "all" || (ok && spec.Group == filter)
 }
 
 func selectedInstruction(filter, target string) bool {
-	return filter == "all" || (filter == "claude" && target == "claude-global") || (filter == "opencode" && target == "opencode-global")
+	spec, ok := lookupTarget("instruction", target)
+	return filter == "all" || (ok && spec.Group == filter)
 }
 
 func selectedConfig(filter, target string) bool {
-	return filter == "all" || (filter == "opencode" && (target == "opencode-config" || target == "naru-runtime"))
+	spec, ok := lookupTarget("config", target)
+	return filter == "all" || (ok && spec.Group == filter)
 }
 
 func LoadReceipt(paths Paths) (receipt Receipt, err error) {
@@ -47,11 +47,14 @@ func LoadReceipt(paths Paths) (receipt Receipt, err error) {
 	}
 	seen := map[string]bool{}
 	for _, p := range receipt.Projections {
-		if !skillNamePattern.MatchString(p.Skill) || (p.Target != "agents" && p.Target != "claude") || p.Strategy != "symlink" || !filepath.IsAbs(p.Source) {
+		if !skillNamePattern.MatchString(p.Skill) || p.Strategy != "symlink" || !filepath.IsAbs(p.Source) {
 			return Receipt{}, fmt.Errorf("invalid receipt projection")
 		}
-		root, _ := targetRoot(paths.Home, p.Target)
-		if p.Destination != filepath.Join(root, p.Skill) {
+		if _, ok := lookupTarget("skill", p.Target); !ok {
+			return Receipt{}, fmt.Errorf("invalid receipt projection")
+		}
+		destination, destinationErr := skillDestination(paths, p.Target, p.Skill)
+		if destinationErr != nil || p.Destination != destination {
 			return Receipt{}, fmt.Errorf("unsafe receipt destination for %s/%s", p.Skill, p.Target)
 		}
 		if filepath.Clean(p.Source) != p.Source || !contained(receipt.RepositoryPath, p.Source) {
@@ -181,8 +184,8 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, filter string
 			if !selectedSkill(filter, target) {
 				continue
 			}
-			root, _ := targetRoot(paths.Home, target)
-			action := Action{Kind: "skill", Skill: projection.Skill, Target: target, Source: loaded.Sources[projection.Skill], Destination: filepath.Join(root, projection.Skill)}
+			destination, _ := skillDestination(paths, target, projection.Skill)
+			action := Action{Kind: "skill", Skill: projection.Skill, Target: target, Source: loaded.Sources[projection.Skill], Destination: destination}
 			desiredSkills[pairKey(projection.Skill, target)] = action
 		}
 	}
@@ -196,8 +199,8 @@ func makePlan(paths Paths, loaded LoadedManifest, receipt Receipt, filter string
 		if !selectedSkill(filter, prior.Target) || desiredSkills[key].Skill != "" {
 			continue
 		}
-		root, _ := targetRoot(paths.Home, prior.Target)
-		action := Action{Kind: "skill", Skill: prior.Skill, Target: prior.Target, Source: prior.Source, Destination: filepath.Join(root, prior.Skill)}
+		destination, _ := skillDestination(paths, prior.Target, prior.Skill)
+		action := Action{Kind: "skill", Skill: prior.Skill, Target: prior.Target, Source: prior.Source, Destination: destination}
 		if exactSymlink(action.Destination, prior.Source) {
 			action.Action = "remove"
 		} else {
@@ -610,7 +613,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			}
 			var sourceBytes []byte
 			if expectedHash, desired := managedSourceHash(loaded, action.Kind, action.Target); desired {
-				sourceBytes, err = readVerifiedManagedSource(loaded.Repository, action.Kind, action.Source, expectedHash)
+				sourceBytes, err = readVerifiedManagedSource(loaded.Repository, action.Kind, action.Target, action.Source, expectedHash)
 				if err != nil {
 					rollbackErr := rollbackAll(rollbacks, skillRollbacks)
 					return errors.Join(err, rollbackErr)
@@ -634,7 +637,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			if actionFor(result, "instruction", instruction.Target).Action == "skip" {
 				continue
 			}
-			data, err := readVerifiedInstructionSource(loaded.Repository, loaded.InstructionSources[instruction.Target], loaded.InstructionHashes[instruction.Target])
+			data, err := readVerifiedInstructionSource(loaded.Repository, instruction.Target, loaded.InstructionSources[instruction.Target], loaded.InstructionHashes[instruction.Target])
 			if err != nil {
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 			}
@@ -644,7 +647,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			if !selectedConfig(target, config.Target) {
 				continue
 			}
-			data, err := readVerifiedManagedSource(loaded.Repository, "config", loaded.ConfigSources[config.Target], loaded.ConfigHashes[config.Target])
+			data, err := readVerifiedManagedSource(loaded.Repository, "config", config.Target, loaded.ConfigSources[config.Target], loaded.ConfigHashes[config.Target])
 			if err != nil {
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 			}
@@ -662,8 +665,8 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				if !selectedSkill(target, destinationTarget) {
 					continue
 				}
-				root, _ := targetRoot(paths.Home, destinationTarget)
-				newReceipt.Projections = append(newReceipt.Projections, ReceiptProjection{Skill: projection.Skill, Target: destinationTarget, Source: loaded.Sources[projection.Skill], Destination: filepath.Join(root, projection.Skill), Strategy: "symlink", AppliedAt: now, TerranBuildVersion: buildVersion})
+				destination, _ := skillDestination(paths, destinationTarget, projection.Skill)
+				newReceipt.Projections = append(newReceipt.Projections, ReceiptProjection{Skill: projection.Skill, Target: destinationTarget, Source: loaded.Sources[projection.Skill], Destination: destination, Strategy: "symlink", AppliedAt: now, TerranBuildVersion: buildVersion})
 			}
 		}
 		for _, old := range receipt.Instructions {
@@ -936,7 +939,7 @@ func resolvableCollision(paths Paths, loaded LoadedManifest, action Action) (res
 	if !desired || source != action.Source {
 		return state, false
 	}
-	sourceBytes, err := readVerifiedManagedSource(loaded.Repository, action.Kind, source, managedHash(loaded, action.Kind, action.Target))
+	sourceBytes, err := readVerifiedManagedSource(loaded.Repository, action.Kind, action.Target, source, managedHash(loaded, action.Kind, action.Target))
 	if err != nil {
 		return state, false
 	}
@@ -1033,7 +1036,7 @@ func preflightAction(paths Paths, loaded LoadedManifest, action Action, ownedSki
 		if err := validateTrustedInstructionSource(loaded.Repository, source); err != nil {
 			return err
 		}
-		data, err := readVerifiedManagedSource(loaded.Repository, action.Kind, source, managedHash(loaded, action.Kind, action.Target))
+		data, err := readVerifiedManagedSource(loaded.Repository, action.Kind, action.Target, source, managedHash(loaded, action.Kind, action.Target))
 		if err != nil {
 			return fmt.Errorf("managed source changed during apply: %w", err)
 		}
@@ -1235,10 +1238,9 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 	}
 	switch action.Action {
 	case "create", "update":
-		mode := os.FileMode(0o644)
-		if action.Kind == "config" {
-			mode = 0o600
-		} else if rollback.existed {
+		spec, _ := lookupTarget(action.Kind, action.Target)
+		mode := spec.Mode
+		if action.Kind == "instruction" && rollback.existed {
 			mode = rollback.mode
 		}
 		mutation, err := atomicInstructionFile(action.Destination, verifiedSource, mode, action.Action == "create")
@@ -1250,9 +1252,10 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 			return rollback, err
 		}
 	case "replace":
-		mode := rollback.mode
-		if action.Kind == "config" {
-			mode = 0o600
+		spec, _ := lookupTarget(action.Kind, action.Target)
+		mode := spec.Mode
+		if action.Kind == "instruction" {
+			mode = rollback.mode
 		}
 		mutation, err := conditionalInstructionReplace(action, verifiedSource, mode, expected.destinationInfo, expected.originalHash, expected.originalMode, true)
 		if mutation.mutated {
@@ -1287,11 +1290,11 @@ func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior 
 	return rollback, nil
 }
 
-func readVerifiedInstructionSource(repository, source, expectedHash string) ([]byte, error) {
-	return readVerifiedManagedSource(repository, "instruction", source, expectedHash)
+func readVerifiedInstructionSource(repository, target, source, expectedHash string) ([]byte, error) {
+	return readVerifiedManagedSource(repository, "instruction", target, source, expectedHash)
 }
 
-func readVerifiedManagedSource(repository, kind, source, expectedHash string) ([]byte, error) {
+func readVerifiedManagedSource(repository, kind, target, source, expectedHash string) ([]byte, error) {
 	if err := validateTrustedInstructionSource(repository, source); err != nil {
 		return nil, err
 	}
@@ -1305,8 +1308,12 @@ func readVerifiedManagedSource(repository, kind, source, expectedHash string) ([
 	if hashBytes(data) != expectedHash {
 		return nil, fmt.Errorf("managed source changed during apply")
 	}
-	if kind == "config" {
-		if err := validateOpenCodeConfig(data); err != nil {
+	spec, ok := lookupTarget(kind, target)
+	if !ok {
+		return nil, fmt.Errorf("unsupported %s target %q", kind, target)
+	}
+	if spec.Validate != nil {
+		if err := spec.Validate(data); err != nil {
 			return nil, fmt.Errorf("config source is unsafe: %w", err)
 		}
 	}

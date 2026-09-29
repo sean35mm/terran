@@ -147,8 +147,8 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return flagError(stdout, stderr, err, jsonRequested(args))
 	}
-	if options.target != "all" && options.target != "agents" && options.target != "claude" && options.target != "opencode" {
-		return usage(stdout, stderr, "target must be all, agents, claude, or opencode", options.json)
+	if err := terran.ValidateTarget(options.target); err != nil {
+		return usage(stdout, stderr, err.Error(), options.json)
 	}
 	if command == "status" {
 		result, err := terran.Status(options.target)
@@ -232,7 +232,7 @@ func newFlags(name string, output io.Writer) (*flag.FlagSet, *commandOptions) {
 		fs.StringVar(&options.name, "name", "", "Command Center display name (default: hostname)")
 		fs.BoolVar(&options.replace, "replace", false, "replace a different existing enrollment")
 	case "plan", "apply", "status":
-		fs.StringVar(&options.target, "target", "all", "projection target: all, agents, claude, or opencode")
+		fs.StringVar(&options.target, "target", "all", "projection target: all, "+strings.Join(terran.TargetGroups(), ", "))
 	}
 	fs.BoolVar(&options.json, "json", false, "emit one JSON object instead of human output")
 	fs.Usage = func() {
@@ -344,12 +344,13 @@ func printCommandHelp(w io.Writer, command string) {
 }
 
 func printCommandIntro(w io.Writer, command string) {
+	targets := "all|" + strings.Join(terran.TargetGroups(), "|")
 	lines := map[string]string{
 		"version": "Usage: terran version [--json]\nRead-only. Prints build metadata. Exit: 0 success, 1 output failure, 2 usage.\n\nFlags:",
 		"enroll":  "Usage: terran enroll --repo PATH [--name NAME] [--replace] [--json]\nMutates private enrollment state; it never creates skill links, instruction files, or config files. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
-		"plan":    "Usage: terran plan [--target all|claude|agents|opencode] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
-		"apply":   "Usage: terran apply [--target all|claude|agents|opencode] [--json]\nMutates only validated skill leaves, fixed instruction/config files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
-		"status":  "Usage: terran status [--target all|claude|agents|opencode] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
+		"plan":    "Usage: terran plan [--target " + targets + "] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
+		"apply":   "Usage: terran apply [--target " + targets + "] [--json]\nMutates only validated skill leaves, fixed instruction/config files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
+		"status":  "Usage: terran status [--target " + targets + "] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
 		"doctor":  "Usage: terran doctor [--json]\nRead-only diagnostics. Exit: 0 healthy, 1 unhealthy or output failure, 2 usage.\n\nFlags:",
 	}
 	fmt.Fprintln(w, lines[command])

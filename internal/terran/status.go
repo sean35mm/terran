@@ -101,8 +101,12 @@ func Doctor(buildVersion string) DoctorResult {
 			add("binary_version", "ok", buildVersion+" matches catalog "+loaded.Manifest.Version)
 		}
 	}
-	for _, target := range []string{"agents", "claude"} {
-		root, _ := targetRoot(paths.Home, target)
+	for _, spec := range targetSpecs {
+		if spec.Kind != "skill" {
+			continue
+		}
+		target := spec.ID
+		root, _ := spec.Dest(paths, "")
 		_, err := os.Lstat(root)
 		if errors.Is(err, os.ErrNotExist) {
 			add("target_"+target, "warn", root+" does not exist yet")

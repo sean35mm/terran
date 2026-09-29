@@ -41,32 +41,30 @@ func ResolvePaths() (Paths, error) {
 }
 
 func instructionDestination(paths Paths, target string) (string, error) {
-	switch target {
-	case "claude-global":
-		return filepath.Join(paths.Home, ".claude", "CLAUDE.md"), nil
-	case "opencode-global":
-		return filepath.Join(paths.ConfigBase, "opencode", "AGENTS.md"), nil
-	default:
+	spec, ok := lookupTarget("instruction", target)
+	if !ok {
 		return "", fmt.Errorf("unsupported instruction target %q", target)
 	}
+	return spec.Dest(paths, "")
 }
 
 func configDestination(paths Paths, target string) (string, error) {
-	switch target {
-	case "opencode-config":
-		return filepath.Join(paths.ConfigBase, "opencode", "opencode.json"), nil
-	case "naru-runtime":
-		return filepath.Join(paths.ConfigBase, "opencode", "naru-runtime.json"), nil
-	default:
+	spec, ok := lookupTarget("config", target)
+	if !ok {
 		return "", fmt.Errorf("unsupported config target %q", target)
 	}
+	return spec.Dest(paths, "")
 }
 
 func managedFileDestination(paths Paths, kind, target string) (string, error) {
-	if kind == "config" {
-		return configDestination(paths, target)
+	spec, ok := lookupTarget(kind, target)
+	if !ok {
+		if kind == "config" {
+			return "", fmt.Errorf("unsupported config target %q", target)
+		}
+		return "", fmt.Errorf("unsupported instruction target %q", target)
 	}
-	return instructionDestination(paths, target)
+	return spec.Dest(paths, "")
 }
 
 func instructionBackup(paths Paths, target string) string {
@@ -74,14 +72,15 @@ func instructionBackup(paths Paths, target string) string {
 }
 
 func targetRoot(home, target string) (string, error) {
-	switch target {
-	case "agents":
-		return filepath.Join(home, ".agents", "skills"), nil
-	case "claude":
-		return filepath.Join(home, ".claude", "skills"), nil
-	default:
+	return skillDestination(Paths{Home: home}, target, "")
+}
+
+func skillDestination(paths Paths, target, name string) (string, error) {
+	spec, ok := lookupTarget("skill", target)
+	if !ok {
 		return "", fmt.Errorf("unsupported target %q", target)
 	}
+	return spec.Dest(paths, name)
 }
 
 func ensurePrivateDir(path string) error {

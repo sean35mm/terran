@@ -46,6 +46,33 @@ func writeCatalog(t *testing.T, repo string, projections []Projection) {
 	}
 }
 
+func TestTargetSpecsHaveUniqueSafeDestinations(t *testing.T) {
+	_, _ = testEnvironment(t)
+	paths, err := ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool)
+	for _, spec := range targetSpecs {
+		key := spec.Kind + "\x00" + spec.ID
+		if seen[key] {
+			t.Fatalf("duplicate target spec %s/%s", spec.Kind, spec.ID)
+		}
+		seen[key] = true
+		name := ""
+		if spec.Kind == "skill" {
+			name = "x"
+		}
+		destination, err := spec.Dest(paths, name)
+		if err != nil {
+			t.Fatalf("resolve %s/%s: %v", spec.Kind, spec.ID, err)
+		}
+		if !contained(paths.Home, destination) && !contained(paths.ConfigBase, destination) {
+			t.Fatalf("destination for %s/%s escapes test roots: %s", spec.Kind, spec.ID, destination)
+		}
+	}
+}
+
 func TestManifestStrictValidationAndStableFingerprint(t *testing.T) {
 	_, repo := testEnvironment(t)
 	first, err := LoadManifest(repo)
