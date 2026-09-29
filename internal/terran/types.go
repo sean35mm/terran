@@ -104,6 +104,7 @@ type ReceiptProjection struct {
 }
 
 type Action struct {
+	ID          string `json:"id"`
 	Kind        string `json:"kind"`
 	Action      string `json:"action"`
 	Skill       string `json:"skill,omitempty"`
@@ -135,6 +136,7 @@ type ApplyOptions struct {
 }
 
 type StatusItem struct {
+	ID          string `json:"id"`
 	Kind        string `json:"kind"`
 	Skill       string `json:"skill,omitempty"`
 	Target      string `json:"target"`

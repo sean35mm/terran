@@ -17,7 +17,7 @@ func Status(target string) (StatusResult, error) {
 	}
 	result := StatusResult{SchemaVersion: SchemaVersion, Clean: true}
 	for _, action := range plan.Actions {
-		item := StatusItem{Kind: action.Kind, Skill: action.Skill, Target: action.Target, Source: action.Source, Destination: action.Destination, Detail: action.Reason}
+		item := StatusItem{ID: action.ID, Kind: action.Kind, Skill: action.Skill, Target: action.Target, Source: action.Source, Destination: action.Destination, Detail: action.Reason}
 		switch action.Action {
 		case "noop":
 			item.Status = "ok"
@@ -31,8 +31,10 @@ func Status(target string) (StatusResult, error) {
 			item.Status = "collision"
 		case "blocked_drift":
 			item.Status = "drift"
+		case "held", "excluded":
+			item.Status = action.Action
 		}
-		if item.Status != "ok" {
+		if item.Status != "ok" && !inert(action) {
 			result.Clean = false
 		}
 		result.Items = append(result.Items, item)
@@ -65,6 +67,11 @@ func Doctor(buildVersion string) DoctorResult {
 		return result
 	}
 	add("enrollment", "ok", fmt.Sprintf("%s at %s", enrollment.RepositoryID, enrollment.RepositoryPath))
+	add("holds", "info", fmt.Sprintf("%d held item(s) on this machine", len(enrollment.Holds)))
+	held := make(map[string]bool, len(enrollment.Holds))
+	for _, id := range enrollment.Holds {
+		held[id] = true
+	}
 	if err := validateTrustedStateFile(paths.ConfigFile, "config.json"); err != nil {
 		add("config_permissions", "fail", err.Error())
 	} else {
@@ -127,7 +134,7 @@ func Doctor(buildVersion string) DoctorResult {
 	} else {
 		instructionHealthy := true
 		for _, managed := range receipt.Managed {
-			if managed.Kind == "instruction" && !doctorManagedFile(paths, enrollment, managed.Kind, managed, add) {
+			if managed.Kind == "instruction" && !held[ItemID(managed.Kind, managed.Target, "")] && !doctorManagedFile(paths, enrollment, managed.Kind, managed, add) {
 				instructionHealthy = false
 			}
 		}
@@ -136,7 +143,7 @@ func Doctor(buildVersion string) DoctorResult {
 		}
 		configHealthy := true
 		for _, managed := range receipt.Managed {
-			if managed.Kind == "config" && !doctorManagedFile(paths, enrollment, managed.Kind, managed, add) {
+			if managed.Kind == "config" && !held[ItemID(managed.Kind, managed.Target, "")] && !doctorManagedFile(paths, enrollment, managed.Kind, managed, add) {
 				configHealthy = false
 			}
 		}

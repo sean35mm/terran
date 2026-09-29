@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -934,5 +935,133 @@ func TestReceiptRestorationFailureIsReportedAndKeepsOwnershipBytes(t *testing.T)
 	}
 	if Doctor("test").Healthy {
 		t.Fatal("doctor did not report unsafe retained receipt")
+	}
+}
+
+func TestHoldPersistsAndIsIdempotent(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global", "opencode-global")
+	if _, err := Hold("instruction/claude-global"); err == nil {
+		t.Fatal("hold succeeded before enrollment")
+	}
+	_, _, _ = Enroll(repo, "test", false)
+	for _, id := range []string{"instruction/nope", "skill/agents/missing"} {
+		if _, err := Hold(id); err == nil {
+			t.Fatalf("unknown id %q held", id)
+		} else if code, next := ErrorCode(err); code != CodeUnknownItem || next != "run terran plan --json to list item ids" {
+			t.Fatalf("unknown id code=%q next=%q", code, next)
+		}
+	}
+	for _, id := range []string{"instruction/opencode-global", "instruction/claude-global", "instruction/claude-global"} {
+		if _, err := Hold(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, _ := ResolvePaths()
+	enrollment, err := LoadEnrollment(paths)
+	if err != nil || !reflect.DeepEqual(enrollment.Holds, []string{"instruction/claude-global", "instruction/opencode-global"}) {
+		t.Fatalf("holds: %#v %v", enrollment.Holds, err)
+	}
+	for _, id := range []string{"instruction/claude-global", "instruction/claude-global", "skill/agents/never-held"} {
+		if _, err := Unhold(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if enrollment, err = LoadEnrollment(paths); err != nil || !reflect.DeepEqual(enrollment.Holds, []string{"instruction/opencode-global"}) {
+		t.Fatalf("holds after unhold: %#v %v", enrollment.Holds, err)
+	}
+}
+
+func TestHeldDriftedInstructionDoesNotBlockAndSkillHoldIsNotProjected(t *testing.T) {
+	home, repo := instructionEnvironment(t, "claude-global")
+	writeCatalogWithInstructions(t, repo, []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}}}, []Instruction{{Target: "claude-global", Source: "instructions/claude-global.md"}})
+	prepareInstructionParents(t)
+	_, _, _ = Enroll(repo, "test", false)
+	if _, err := Hold("skill/agents/example"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".agents", "skills", "example")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("held skill was projected")
+	}
+	paths, _ := ResolvePaths()
+	receipt, err := LoadReceipt(paths)
+	if err != nil || len(receipt.Projections) != 1 || receipt.Projections[0].Target != "claude" {
+		t.Fatalf("receipt: %#v %v", receipt, err)
+	}
+	destination, _ := instructionDestination(paths, "claude-global")
+	_ = os.WriteFile(destination, []byte("drifted\n"), 0o644)
+	if plan, _ := Plan("all"); actionCount(plan, "blocked_drift") != 1 {
+		t.Fatalf("drift not detected: %#v", plan)
+	}
+	if _, err := Hold("instruction/claude-global"); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Plan("all")
+	if err != nil || blocked(plan) || actionCount(plan, "held") != 2 {
+		t.Fatalf("held plan: %#v %v", plan, err)
+	}
+	status, err := Status("all")
+	if err != nil || !status.Clean {
+		t.Fatalf("held status: %#v %v", status, err)
+	}
+	for _, check := range Doctor("test").Checks {
+		if check.Name == "holds" && check.Status != "info" || check.Name == "instruction_receipt" && check.Status == "fail" {
+			t.Fatalf("doctor check: %#v", check)
+		}
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(destination); string(data) != "drifted\n" {
+		t.Fatal("held instruction was modified")
+	}
+}
+
+func TestHeldOwnedInstructionRemovedFromCatalogStaysUntouched(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global")
+	prepareInstructionParents(t)
+	paths, _ := ResolvePaths()
+	destination, _ := instructionDestination(paths, "claude-global")
+	original := []byte("# claude-global\n")
+	_ = os.WriteFile(destination, original, 0o640)
+	_, _, _ = Enroll(repo, "test", false)
+	if _, err := Apply("claude", "test"); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(repo, "instructions", "claude-global.md"), []byte("# managed change\n"), 0o644)
+	if _, err := Apply("claude", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Hold("instruction/claude-global"); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogWithInstructions(t, repo, nil, nil)
+	backup := instructionBackup(paths, "claude-global")
+	before := snapshotManagedDestination(t, destination)
+	backupBefore := snapshotManagedDestination(t, backup)
+	receiptBefore, err := LoadReceipt(paths)
+	if err != nil || len(receiptBefore.Managed) != 1 || receiptBefore.Managed[0].Origin != "adopted" {
+		t.Fatalf("receipt: %#v %v", receiptBefore, err)
+	}
+	plan, err := Plan("all")
+	if err != nil || len(plan.Actions) != 1 || plan.Actions[0].Action != "held" || blocked(plan) {
+		t.Fatalf("held removal plan: %#v %v", plan, err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	assertManagedDestinationUnchanged(t, destination, before, snapshotManagedDestination(t, destination))
+	assertManagedDestinationUnchanged(t, backup, backupBefore, snapshotManagedDestination(t, backup))
+	receiptAfter, err := LoadReceipt(paths)
+	if err != nil || !reflect.DeepEqual(receiptBefore.Managed, receiptAfter.Managed) {
+		t.Fatalf("receipt entry changed: %#v %v", receiptAfter.Managed, err)
+	}
+	if _, err := Unhold("instruction/claude-global"); err != nil {
+		t.Fatal(err)
+	}
+	if plan, _ := Plan("all"); actionCount(plan, "restore") != 1 {
+		t.Fatalf("unheld plan: %#v", plan)
 	}
 }

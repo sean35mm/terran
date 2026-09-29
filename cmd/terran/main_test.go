@@ -328,3 +328,51 @@ func assertJSONError(t *testing.T, data []byte, code, message, next string) {
 		t.Fatalf("unexpected JSON error: %#v", result)
 	}
 }
+
+func TestCLIHoldAndUnhold(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	repo := filepath.Join(base, "repo")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	if err := os.MkdirAll(filepath.Join(repo, "instructions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "instructions", "CLAUDE.md"), []byte("# test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"schema_version":2,"id":"test-catalog","version":"0.1.0","projections":[],"instructions":[{"target":"claude-global","source":"instructions/CLAUDE.md"}]}`
+	if err := os.WriteFile(filepath.Join(repo, "terran.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := terran.Enroll(repo, "test", false); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		args []string
+		code int
+		want string
+	}{
+		{[]string{"hold", "instruction/claude-global", "--json"}, 0, `{"schema_version":2,"holds":["instruction/claude-global"]}`},
+		{[]string{"hold", "--json", "instruction/claude-global"}, 0, `{"schema_version":2,"holds":["instruction/claude-global"]}`},
+		{[]string{"unhold", "instruction/claude-global", "--json"}, 0, `{"schema_version":2,"holds":[]}`},
+		{[]string{"unhold", "instruction/claude-global", "--json"}, 0, `{"schema_version":2,"holds":[]}`},
+		{[]string{"hold", "--json"}, 2, ""},
+		{[]string{"hold", "a", "b"}, 2, ""},
+		{[]string{"hold", "--help"}, 0, "Usage: terran hold"},
+		{[]string{"hold", "instruction/other", "--json"}, 1, ""},
+	}
+	for _, tc := range cases {
+		var out, errOut bytes.Buffer
+		if got := run(tc.args, &out, &errOut); got != tc.code {
+			t.Fatalf("%v code %d, want %d; stdout=%q stderr=%q", tc.args, got, tc.code, out.String(), errOut.String())
+		}
+		if tc.want != "" && !strings.Contains(out.String(), tc.want) {
+			t.Fatalf("%v output %q", tc.args, out.String())
+		}
+	}
+	var out, errOut bytes.Buffer
+	run([]string{"hold", "instruction/other", "--json"}, &out, &errOut)
+	assertJSONError(t, out.Bytes(), terran.CodeUnknownItem, "hold failed", "run terran plan --json to list item ids")
+}

@@ -968,3 +968,55 @@ func fileMode(t *testing.T, path string) os.FileMode {
 	}
 	return info.Mode().Perm()
 }
+
+func TestPlatformFilterExcludesAndRemovesOwned(t *testing.T) {
+	home, repo := testEnvironment(t)
+	writeCatalog(t, repo, []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents", "claude"}, Platforms: []string{"darwin"}}})
+	_, _, _ = Enroll(repo, "test", false)
+	previous := currentPlatform
+	t.Cleanup(func() { currentPlatform = previous })
+	link := filepath.Join(home, ".agents", "skills", "example")
+
+	currentPlatform = "linux"
+	plan, err := Plan("all")
+	if err != nil || actionCount(plan, "excluded") != 2 || !plan.Clean {
+		t.Fatalf("excluded plan: %#v %v", plan, err)
+	}
+	if plan.Actions[0].Reason != "darwin-only" || plan.Actions[0].ID != "skill/agents/example" {
+		t.Fatalf("excluded action: %#v", plan.Actions[0])
+	}
+	if status, err := Status("all"); err != nil || !status.Clean || status.Items[0].Status != "excluded" {
+		t.Fatalf("excluded status: %#v %v", status, err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("excluded skill was projected")
+	}
+
+	currentPlatform = "darwin"
+	if plan, _ := Plan("all"); actionCount(plan, "create") != 2 {
+		t.Fatalf("darwin plan: %#v", plan)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatal(err)
+	}
+
+	currentPlatform = "linux"
+	if plan, _ := Plan("all"); actionCount(plan, "remove") != 2 || actionCount(plan, "excluded") != 0 {
+		t.Fatalf("owned excluded plan: %#v", plan)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("owned excluded skill was not removed")
+	}
+	if plan, _ := Plan("all"); actionCount(plan, "excluded") != 2 {
+		t.Fatalf("plan after removal: %#v", plan)
+	}
+}

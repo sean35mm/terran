@@ -110,6 +110,8 @@ func runWithIO(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "plan", "apply", "status":
 		return runProjectionCommand(args[0], args[1:], stdout, stderr)
+	case "hold", "unhold":
+		return runHoldCommand(args[0], args[1:], stdout, stderr)
 	case "doctor":
 		if commandHelpRequested(args[1:]) {
 			printCommandHelp(stdout, "doctor")
@@ -214,6 +216,57 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 	return 0
 }
 
+func runHoldCommand(command string, args []string, stdout, stderr io.Writer) int {
+	if commandHelpRequested(args) {
+		printCommandHelp(stdout, command)
+		return 0
+	}
+	fs, options := newFlags(command, stderr)
+	// The flag package stops at the first positional argument, so parse again after taking the id.
+	var id string
+	for rest := args; ; {
+		if err := fs.Parse(rest); err != nil {
+			return flagError(stdout, stderr, err, jsonRequested(args))
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		if id != "" {
+			return usage(stdout, stderr, "expected exactly one item id", options.json)
+		}
+		id, rest = fs.Arg(0), fs.Args()[1:]
+	}
+	if id == "" {
+		return usage(stdout, stderr, "expected exactly one item id", options.json)
+	}
+	change := terran.Hold
+	if command == "unhold" {
+		change = terran.Unhold
+	}
+	enrollment, err := change(id)
+	if err != nil {
+		if options.json {
+			return jsonOperational(stdout, stderr, command+" failed", err)
+		}
+		return operational(stderr, err)
+	}
+	if options.json {
+		holds := enrollment.Holds
+		if holds == nil {
+			holds = []string{}
+		}
+		if err := writeJSON(stdout, struct {
+			SchemaVersion int      `json:"schema_version"`
+			Holds         []string `json:"holds"`
+		}{terran.SchemaVersion, holds}); err != nil {
+			return operational(stderr, fmt.Errorf("write output: %w", err))
+		}
+	} else {
+		fmt.Fprintf(stdout, "%s %s. Held items: %d.\n", map[string]string{"hold": "Held", "unhold": "Released"}[command], id, len(enrollment.Holds))
+	}
+	return 0
+}
+
 type commandOptions struct {
 	repo    string
 	name    string
@@ -313,7 +366,7 @@ func printError(stderr io.Writer, err error) {
 
 func knownCommand(command string) bool {
 	switch command {
-	case "enroll", "plan", "apply", "status", "doctor", "version":
+	case "enroll", "plan", "apply", "status", "hold", "unhold", "doctor", "version":
 		return true
 	}
 	return false
@@ -332,6 +385,8 @@ Advanced and automation:
   terran plan             Inspect proposed changes without mutation
   terran apply            Apply an explicitly selected, validated plan
   terran status           Inspect low-level managed state
+  terran hold             Pin one item on this machine so apply leaves it alone
+  terran unhold           Release a held item
   terran version          Print build metadata
 
 Run terran help COMMAND for flags and exit codes. Commands support stable
@@ -351,6 +406,8 @@ func printCommandIntro(w io.Writer, command string) {
 		"plan":    "Usage: terran plan [--target " + targets + "] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"apply":   "Usage: terran apply [--target " + targets + "] [--json]\nMutates only validated skill leaves, fixed instruction/config files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"status":  "Usage: terran status [--target " + targets + "] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
+		"hold":    "Usage: terran hold ITEM_ID [--json]\nMutates private enrollment state only. Pins an item id from terran plan --json so plan and apply never inspect or change it. Exit: 0 success, 1 operational failure (including unknown_item), 2 usage.\n\nFlags:",
+		"unhold":  "Usage: terran unhold ITEM_ID [--json]\nMutates private enrollment state only. Releases a held item; releasing an item that is not held succeeds. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
 		"doctor":  "Usage: terran doctor [--json]\nRead-only diagnostics. Exit: 0 healthy, 1 unhealthy or output failure, 2 usage.\n\nFlags:",
 	}
 	fmt.Fprintln(w, lines[command])
