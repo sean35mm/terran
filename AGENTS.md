@@ -41,4 +41,5 @@ sh -n install.sh
 Also validate `terran.json`, scan public content for secrets and private paths,
 and build all supported Darwin/Linux amd64/arm64 targets for release-affecting
 changes. Do not commit, tag, publish, or replace release assets unless the user
-explicitly requests that delivery step.
+explicitly requests that delivery step. Pushing a new `terran.json` version with
+a dated `CHANGELOG.md` heading to `main` publishes a release automatically.

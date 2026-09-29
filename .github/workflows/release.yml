@@ -2,18 +2,69 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
+  # Publishes vX.Y.Z from main once terran.json says X.Y.Z and CHANGELOG.md has
+  # a dated "## X.Y.Z - YYYY-MM-DD" heading. Pushes that change neither are no-ops.
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      version: ${{ steps.check.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+      - id: check
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import json; print(json.load(open("terran.json"))["version"])')
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version is already released"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "::error::tag v$version exists without a release; published tags are never moved"
+            exit 1
+          fi
+          if python3 - "$version" <<'PY2'
+          import datetime
+          import pathlib
+          import re
+          import sys
+
+          version = re.escape(sys.argv[1])
+          matches = re.findall(rf"^## {version} - (\d{{4}}-\d{{2}}-\d{{2}})$", pathlib.Path("CHANGELOG.md").read_text(), re.MULTILINE)
+          if len(matches) != 1:
+              raise SystemExit(1)
+          datetime.date.fromisoformat(matches[0])
+          PY2
+          then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "CHANGELOG.md has no single dated heading for $version; not releasing"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
   verify:
+    needs: check
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,33 +75,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Verify release metadata
-        run: |
-          set -euo pipefail
-          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          test "$GITHUB_REF_NAME" = "v$(python3 -c 'import json; print(json.load(open("terran.json"))["version"])')"
-          python3 - "${GITHUB_REF_NAME#v}" <<'PY'
-          import datetime
-          import pathlib
-          import re
-          import sys
-
-          version = re.escape(sys.argv[1])
-          matches = re.findall(rf"^## {version} - (\d{{4}}-\d{{2}}-\d{{2}})$", pathlib.Path("CHANGELOG.md").read_text(), re.MULTILINE)
-          if len(matches) != 1:
-              raise SystemExit("changelog must contain exactly one dated heading for the release version")
-          datetime.date.fromisoformat(matches[0])
-          PY
-      - name: Verify tag commit is on main
-        run: |
-          set -euo pipefail
-          if [[ $(git rev-parse --is-shallow-repository) == true ]]; then
-            git fetch --no-tags --prune --unshallow origin '+refs/heads/main:refs/remotes/origin/main'
-          else
-            git fetch --no-tags --prune origin '+refs/heads/main:refs/remotes/origin/main'
-          fi
-          tag_commit=$(git rev-parse --verify "${GITHUB_REF}^{commit}")
-          git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
       - run: python3 scripts/validate-docs.py docs
       - run: go test -count=1 ./...
       - run: go test -count=1 -race ./...
@@ -60,7 +84,7 @@ jobs:
       - run: sh tests/install_leaf.sh
 
   publish:
-    needs: verify
+    needs: [check, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -76,7 +100,7 @@ jobs:
       - name: Build archives and checksums
         run: |
           set -eu
-          version=${GITHUB_REF_NAME#v}
+          version=${{ needs.check.outputs.version }}
           commit=$GITHUB_SHA
           date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           mkdir -p dist
@@ -93,4 +117,4 @@ jobs:
           cd dist
           sha256sum install.sh terran_*.tar.gz > SHA256SUMS
       - name: Publish release once
-        run: gh release create "$GITHUB_REF_NAME" dist/install.sh dist/terran_*.tar.gz dist/SHA256SUMS --verify-tag --title "Terran $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "v${{ needs.check.outputs.version }}" dist/install.sh dist/terran_*.tar.gz dist/SHA256SUMS --target "$GITHUB_SHA" --title "Terran v${{ needs.check.outputs.version }}" --generate-notes

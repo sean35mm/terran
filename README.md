@@ -735,8 +735,10 @@ GOOS=linux GOARCH=arm64 go build -o tmp/terran-linux-arm64 ./cmd/terran
 
 Tests use temporary `HOME` and XDG roots only. Release work must also validate
 JSON, public-file hygiene, instruction and config guidance, all four builds,
-checksums, and the changelog. The release tag `vX.Y.Z` must match catalog version
-`X.Y.Z`. Do not move a published tag; investigate compromise and publish a
+checksums, and the changelog. Releases are automatic: a push to `main` whose
+`terran.json` version `X.Y.Z` has no release yet and whose `CHANGELOG.md` has a
+dated `## X.Y.Z - YYYY-MM-DD` heading publishes `vX.Y.Z` from that commit. Keep
+the heading `Unreleased` until the release is ready. Do not move a published tag; investigate compromise and publish a
 corrected release according to the security policy.
 
 ## Licenses
