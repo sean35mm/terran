@@ -414,6 +414,13 @@ func combineCatalogs(primary LoadedManifest, overlay *LoadedManifest) (Catalogs,
 				}
 			}
 		}
+		for _, tool := range o.Tools {
+			for _, prior := range p.Tools {
+				if tool.Name == prior.Name {
+					return Catalogs{}, duplicate("tool " + tool.Name)
+				}
+			}
+		}
 		overlayFingerprint = overlay.Fingerprint
 	}
 	sum := sha256.Sum256([]byte(primary.Fingerprint + "\n" + overlayFingerprint))

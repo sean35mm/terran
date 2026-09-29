@@ -109,6 +109,18 @@ func Doctor(buildVersion string) DoctorResult {
 		} else {
 			add("binary_version", "ok", buildVersion+" matches catalog "+loaded.Manifest.Version)
 		}
+		for _, catalog := range catalogs.list() {
+			for _, tool := range catalog.Manifest.Tools {
+				if !platformIncluded(tool.Platforms) {
+					continue
+				}
+				if _, err := exec.LookPath(tool.Name); err != nil {
+					add("tool:"+tool.Name, "fail", tool.Name+" not found on PATH; follow terran-provision tools step")
+				} else {
+					add("tool:"+tool.Name, "ok", tool.Name+" found on PATH")
+				}
+			}
+		}
 	}
 	for _, spec := range targetSpecs {
 		if spec.Kind != "skill" {

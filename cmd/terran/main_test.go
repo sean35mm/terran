@@ -95,7 +95,7 @@ func TestCommandHelpIncludesFlagsDefaultsBehaviorAndExitCodes(t *testing.T) {
 }
 
 func TestSubcommandHelpOutputAndTrailingArgument(t *testing.T) {
-	commands := []string{"version", "enroll", "plan", "apply", "status", "doctor"}
+	commands := []string{"version", "enroll", "plan", "apply", "status", "capture", "doctor"}
 	for _, command := range commands {
 		t.Run(command, func(t *testing.T) {
 			var out, errOut bytes.Buffer
@@ -154,6 +154,12 @@ func TestCLIJSONOperationalAndBlockedExitCodes(t *testing.T) {
 		t.Fatalf("operational code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	assertJSONError(t, out.Bytes(), terran.CodeNotEnrolled, "status failed", "run terran enroll --repo <path> --name <ccN>; see README Agent guide")
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"capture", "--json"}, &out, &errOut); code != 1 {
+		t.Fatalf("capture code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	assertJSONError(t, out.Bytes(), terran.CodeNotEnrolled, "capture failed", "run terran enroll --repo <path> --name <ccN>; see README Agent guide")
 	out.Reset()
 	errOut.Reset()
 	if code := run([]string{"status"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "next: run terran enroll --repo <path> --name <ccN>; see README Agent guide") {

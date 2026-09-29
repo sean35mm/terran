@@ -113,6 +113,8 @@ func runWithIO(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "plan", "apply", "status":
 		return runProjectionCommand(args[0], args[1:], stdout, stderr)
+	case "capture":
+		return runCaptureCommand(args[1:], stdout, stderr)
 	case "hold", "unhold":
 		return runHoldCommand(args[0], args[1:], stdout, stderr)
 	case "doctor":
@@ -231,6 +233,37 @@ func runProjectionCommand(command string, args []string, stdout, stderr io.Write
 	return 0
 }
 
+func runCaptureCommand(args []string, stdout, stderr io.Writer) int {
+	if commandHelpRequested(args) {
+		printCommandHelp(stdout, "capture")
+		return 0
+	}
+	fs, options := newFlags("capture", stderr)
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return flagError(stdout, stderr, err, jsonRequested(args))
+	}
+	if err := terran.ValidateTarget(options.target); err != nil {
+		return usage(stdout, stderr, err.Error(), options.json)
+	}
+	result, err := terran.Capture(options.target)
+	if err != nil {
+		if options.json {
+			return jsonOperational(stdout, stderr, "capture failed", err)
+		}
+		return operational(stderr, err)
+	}
+	if options.json {
+		if err := writeJSON(stdout, result); err != nil {
+			return operational(stderr, fmt.Errorf("write output: %w", err))
+		}
+	} else {
+		for _, item := range result.Items {
+			fmt.Fprintf(stdout, "%s  %s\n", item.ID, item.Kind)
+		}
+	}
+	return 0
+}
+
 func runHoldCommand(command string, args []string, stdout, stderr io.Writer) int {
 	if commandHelpRequested(args) {
 		printCommandHelp(stdout, command)
@@ -304,7 +337,7 @@ func newFlags(name string, output io.Writer) (*flag.FlagSet, *commandOptions) {
 		fs.StringVar(&options.name, "name", "", "Command Center display name (default: hostname; kept when re-enrolling)")
 		fs.StringVar(&options.overlay, "overlay", "", "absolute path to a private overlay catalog that only adds items (default: keep the enrolled overlay)")
 		fs.BoolVar(&options.replace, "replace", false, "replace a different existing enrollment; with the same repository, drop an overlay not given by --overlay")
-	case "plan", "apply", "status":
+	case "plan", "apply", "status", "capture":
 		fs.StringVar(&options.target, "target", "all", "projection target: all, "+strings.Join(terran.TargetGroups(), ", "))
 	}
 	if name == "apply" {
@@ -403,7 +436,7 @@ func printError(stderr io.Writer, err error) {
 
 func knownCommand(command string) bool {
 	switch command {
-	case "enroll", "plan", "apply", "status", "hold", "unhold", "doctor", "version":
+	case "enroll", "plan", "apply", "status", "capture", "hold", "unhold", "doctor", "version":
 		return true
 	}
 	return false
@@ -422,6 +455,7 @@ Advanced and automation:
   terran plan             Inspect proposed changes without mutation
   terran apply            Apply an explicitly selected, validated plan
   terran status           Inspect low-level managed state
+  terran capture          List unmanaged agent setup on this machine
   terran hold             Pin one item on this machine so apply leaves it alone
   terran unhold           Release a held item
   terran version          Print build metadata
@@ -443,6 +477,7 @@ func printCommandIntro(w io.Writer, command string) {
 		"plan":    "Usage: terran plan [--target " + targets + "] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"apply":   "Usage: terran apply [--target " + targets + "] [--decide ITEM_ID=replace|keep]... [--expect DIGEST] [--json]\nUndecided collisions block (exit 3). A --decide for an item that is not a blocked_collision is a usage error and nothing is changed; a stale --expect fails with plan_changed. Mutates only validated skill leaves, fixed instruction/config files, named files in fixed directories, owned top-level keys in fixed JSON settings files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"status":  "Usage: terran status [--target " + targets + "] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
+		"capture": "Usage: terran capture [--target " + targets + "] [--json]\nRead-only. Lists entries in skill and file directories, whole-file targets, and top-level settings keys that Terran does not own, as ITEM_ID KIND lines (values are never printed). Skips hidden, naru- prefixed, held, and already owned entries. Exit: 0 success, 1 operational failure (including not_enrolled), 2 usage.\n\nFlags:",
 		"hold":    "Usage: terran hold ITEM_ID [--json]\nMutates private enrollment state only. Pins an item id from terran plan --json so plan and apply never inspect or change it. Exit: 0 success, 1 operational failure (including unknown_item), 2 usage.\n\nFlags:",
 		"unhold":  "Usage: terran unhold ITEM_ID [--json]\nMutates private enrollment state only. Releases a held item; releasing an item that is not held succeeds. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
 		"doctor":  "Usage: terran doctor [--json]\nRead-only diagnostics. Exit: 0 healthy, 1 unhealthy or output failure, 2 usage.\n\nFlags:",
