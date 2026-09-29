@@ -108,6 +108,9 @@ func inspectJSONSettings(paths Paths, destination string) jsonSettings {
 	if _, err := os.Lstat(filepath.Dir(destination)); errors.Is(err, os.ErrNotExist) {
 		return jsonSettings{blocked: "parent directory missing"}
 	}
+	if err := leftoverQuarantine(destination); err != nil {
+		return jsonSettings{blocked: err.Error()}
+	}
 	if err := validateInstructionParent(destination); err != nil {
 		return jsonSettings{blocked: err.Error()}
 	}

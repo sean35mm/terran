@@ -309,7 +309,7 @@ reports the matching status.
 | `noop` | `ok` | Already up to date. |
 | `create` | `missing` | The item does not exist yet; Terran will create it. |
 | `adopt` | `pending` | An identical item already exists; Terran takes ownership without changing it (files keep a private backup). |
-| `update` | `pending` | The catalog changed; Terran will copy the new version. For a skill this is also the one-time `convert live symlink to managed copy`. |
+| `update` | `pending` | The catalog changed; Terran will copy the new version. For a skill this is also the one-time `convert live symlink to managed copy`, or `recover interrupted apply (content already matches catalog)`, which only records a copy already in place. |
 | `replace` | `pending` | A collision was resolved with `replace`. Originals are backed up privately. |
 | `remove` | `orphaned` | The item left the catalog; Terran will delete what it created. |
 | `restore` | `orphaned` | The item left the catalog; Terran will put back the original it had adopted. |
@@ -425,7 +425,9 @@ every skill as it was. A copy that was edited, lost a file, or changed an
 executable bit is `blocked_drift`. An existing directory identical to the
 source is adopted, and released (kept) if the skill later leaves the catalog.
 Skill sources may contain only regular files and directories: at most 2000
-entries and 32 MiB per skill.
+entries and 32 MiB per skill. Every source file and directory must be
+world-readable (a private one is `manifest_invalid`), so a copy never widens the
+permissions of a private file.
 
 Machines applied with Terran 0.3 hold live symlinks. Their first 0.4 plan shows
 each as `update` with the reason `convert live symlink to managed copy`, and
@@ -616,6 +618,9 @@ quarantine file. Rollback uses the same conditional protocol.
 A reported quarantine recovery file is not receipt-owned or cleaned
 automatically. Preserve and inspect it, reconcile it with the active file and the
 private backup, and remove it only after the user confirms no needed bytes remain.
+While a `.terran-quarantine-*` entry remains beside a managed file or settings
+file, every item for that destination plans as `blocked_collision` (`leftover
+Terran quarantine found at <path>`) and cannot be replaced.
 If replacement is interrupted after the backup is published but before the
 receipt is committed, Terran reports a possible interrupted replacement and
 preserves the backup for manual recovery.
@@ -647,6 +652,16 @@ mutation, validation, or receipt write fails, Terran rolls back already changed
 leaves in reverse order when their identity is still safe. No portable transaction
 spans every root, so a crash at the wrong instant can leave a case for `status`
 and `doctor` to report.
+
+From the first mutation until the receipt commits or rolls back, apply ignores
+SIGINT, SIGTERM, and SIGHUP, so an interrupt or SSH disconnect cannot stop it
+halfway. If a crash still lands after a skill copy was installed but before the
+receipt was written, the next plan shows that skill as `update` with `recover
+interrupted apply (content already matches catalog)` when its tree hash equals
+the catalog's; that apply only records the copy in the receipt. Any other
+mismatch stays `blocked_drift`. `terran doctor` warns about leftover
+`.terran-tmp-*`, `.terran-old-*`, and `.terran-quarantine-*` entries in skill
+roots and managed destination directories; Terran never deletes them.
 
 ## Update
 

@@ -139,7 +139,7 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 			return LoadedManifest{}, fmt.Errorf("skill %s has multiple sources", p.Skill)
 		}
 		if _, ok := skillHashes[p.Skill]; !ok {
-			_, hash, err := readSkillTree(canonicalSource)
+			_, hash, err := readSkillTree(canonicalSource, true)
 			if err != nil {
 				return LoadedManifest{}, fmt.Errorf("source for %s: %w", p.Skill, err)
 			}
@@ -534,9 +534,26 @@ type skillEntry struct {
 // "<type>\x00<path>\x00<mode>\x00<content sha256>\n" line per entry, where
 // type is "dir" or "file" and directories have an empty content hash. Only
 // trusted real directories and regular files are allowed, within
-// skillEntryLimit entries and skillByteLimit bytes.
-func readSkillTree(root string) ([]skillEntry, string, error) {
+// skillEntryLimit entries and skillByteLimit bytes. A catalog source
+// (requirePublic) must also be world-readable, so a copy never widens the
+// permissions of a private file.
+func readSkillTree(root string, requirePublic bool) ([]skillEntry, string, error) {
 	if err := validateTrustedDirectory(root, "skill directory"); err != nil {
+		return nil, "", err
+	}
+	public := func(path string, info os.FileInfo) error {
+		want := os.FileMode(0o004)
+		if info.IsDir() {
+			want = 0o005
+		}
+		if requirePublic && info.Mode().Perm()&want != want {
+			return fmt.Errorf("skill entry %s must be world-readable", path)
+		}
+		return nil
+	}
+	if info, err := os.Lstat(root); err != nil {
+		return nil, "", err
+	} else if err := public(root, info); err != nil {
 		return nil, "", err
 	}
 	var entries []skillEntry
@@ -558,6 +575,9 @@ func readSkillTree(root string) ([]skillEntry, string, error) {
 			}
 			info, err := os.Lstat(path)
 			if err != nil {
+				return err
+			}
+			if err := public(path, info); err != nil {
 				return err
 			}
 			switch {
@@ -604,6 +624,6 @@ func readSkillTree(root string) ([]skillEntry, string, error) {
 
 // skillTreeHash is the readSkillTree hash of a directory.
 func skillTreeHash(root string) (string, error) {
-	_, hash, err := readSkillTree(root)
+	_, hash, err := readSkillTree(root, false)
 	return hash, err
 }

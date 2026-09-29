@@ -22,8 +22,9 @@ ssh -o BatchMode=yes -o ConnectTimeout=5 <alias> .local/bin/terran <args>
 - Never push to git, on this machine or the target. The user pushes.
 - Never apply, hold, unhold, merge, or otherwise mutate the target without explicit approval in this conversation for that exact command on that exact host.
 - Before every remote command, say which host and which command you are about to run.
-- One command per SSH call. No chained remote shell: no `;`, `&&`, `||`, pipes, redirects, command substitution, or `sh -c`. Repository paths and commit ids passed to `git` must be plain (absolute path without spaces or shell metacharacters; commit ids are 40 hex characters); otherwise stop and ask.
-- Never read, print, copy, or store secrets. Never `cat` credential files, tokens, or settings that may hold them. Redact private absolute paths before sharing output.
+- One command per SSH call. No chained remote shell: no `;`, `&&`, `||`, pipes, redirects, command substitution, or `sh -c`.
+- Every argument that came from the remote side or the catalog (destination paths, item ids, repository paths, commit ids) must be a plain token before you put it in an `ssh <alias> ...` command: only letters, digits, and `/._-+@:`; no spaces, quotes, `$`, backticks, `;|&<>()`, or newlines. Commit ids must also be 40 hex characters. Otherwise stop and report the value to the user; do not quote or escape it.
+- Never read, print, copy, or store secrets. Never read (with `cat` or anything else) credential, auth, or token files, `.env` files, mise config (`~/.config/mise/config.toml`; its `[env]` can hold secrets), Claude hooks (`~/.claude/hooks/`), or the values in any settings file (`~/.claude/settings.json`, `~/.t3/userdata/settings.json`, OpenCode configs). Redact private absolute paths before sharing output.
 - Never edit a Terran-managed file on the target directly. Change the catalog, get it there through git, and apply.
 - Respect holds: a `held` item is deliberate. Do not release or work around it unless the user asks.
 - Never delete, move, or overwrite anything on the target to make a plan clean.
@@ -32,8 +33,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=5 <alias> .local/bin/terran <args>
 ## 1. Orientation
 
 1. Run `terran status --json` on this machine (fleet view). Find the target row: reachability, `terran_version`, `catalog_commit`, `overlay_commit`, `clean`, `healthy`, `held`, `drifted`, `blocked`, `tools_missing`, and `error`.
-2. `reachable` false (`offline`, `terran not found`, `incompatible terran`, or a `<code>: <message>` error): tell the user the reason and stop. Do not retry in a loop and do not try other transports.
-3. Target `terran_version` older than this machine's: offer `terran-update` on the target first (binary before catalog; schema 2 catalogs need Terran 0.4 or newer). Do not continue with the catalog until the binary is current.
+2. `reachable` false (`offline`, `terran not found`, or a `<code>: <message>` error): tell the user the reason and stop. Do not retry in a loop and do not try other transports. `incompatible terran` is different: the target most likely runs an older Terran (0.3 has no `status --summary`), so go to step 3 instead of stopping.
+3. Target `terran_version` older than this machine's, or the row shows `incompatible terran`: offer `terran-update` on the target first (binary before catalog; schema 2 catalogs need Terran 0.4 or newer). Do not continue with the catalog until the binary is current.
 4. Compare `catalog_commit` and `overlay_commit` with this machine's row. Matching commits with `clean` true means nothing to do; say so and stop.
 5. Summarize for the user: version, commits behind or ahead, held, drift, blocked, tools missing. Then ask what they want (update, diagnose, fix).
 
@@ -86,9 +87,9 @@ d. Plan on the target (read-only):
 ssh -o BatchMode=yes <alias> .local/bin/terran plan --json
 ```
 
-   Show the user the full plan grouped as changes (`create`, `adopt`, `update`, `replace`, `remove`, `restore`, `release`), `held`, `excluded`, and `blocked_collision` / `blocked_drift`, with each item id and reason, plus the `digest`. Explain `excluded` items: the catalog item is for another platform (the reason reads like `darwin-only`), which is expected. Explain that an `update` with `convert live symlink to managed copy` is the one-time 0.3 to 0.4 skill conversion. Exit code 3 means blocked; that is a result to report, not a failure to retry.
+   Show the user the full plan grouped as changes (`create`, `adopt`, `update`, `replace`, `remove`, `restore`, `release`), `held`, `excluded`, and `blocked_collision` / `blocked_drift`, with each item id and reason, plus the `digest`. Explain `excluded` items: the catalog item is for another platform (the reason reads like `darwin-only`), which is expected. Explain that an `update` with `convert live symlink to managed copy` is the one-time 0.3 to 0.4 skill conversion, and one with `recover interrupted apply (content already matches catalog)` only records a copy an interrupted apply already installed. Exit code 3 means blocked; that is a result to report, not a failure to retry.
 
-e. Collisions: for every `blocked_collision`, show the user both versions when possible. Reading the target's version needs the user's approval and one command per file (`ssh -o BatchMode=yes <alias> cat <destination>`), and never for credential-bearing files such as `~/.claude/settings.json`, `~/.t3/userdata/settings.json`, or OpenCode configs; for those, describe the difference by item id and reason only, or ask the user to inspect it on the machine. The catalog version is in the catalog on this machine. The user chooses per item: `replace` (original backed up privately) or `keep` (holds the item on the target). Never choose for them. Any `blocked_drift` blocks the whole apply: use procedure 3.
+e. Collisions: for every `blocked_collision`, show the user both versions when possible. Reading the target's version needs the user's approval and one command per file (`ssh -o BatchMode=yes <alias> cat <destination>`), and never for any file in the never-read rule above (settings files, OpenCode configs, mise config, Claude hooks); for those, describe the difference by item id and reason only, or ask the user to inspect it on the machine. The catalog version is in the catalog on this machine. The user chooses per item: `replace` (original backed up privately) or `keep` (holds the item on the target). Never choose for them. Any `blocked_drift` blocks the whole apply: use procedure 3.
 
 f. Only after explicit approval in this conversation, apply with the digest you showed and one `--decide` per collision the user decided:
 

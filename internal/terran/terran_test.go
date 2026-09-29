@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -929,6 +930,116 @@ func TestLegacySymlinkProjectionsConvertToCopies(t *testing.T) {
 	}
 	if plan := mustPlan(t, "all"); actionCount(plan, "blocked_drift") != 2 {
 		t.Fatalf("changed legacy link was not drift: %#v", plan)
+	}
+}
+
+// An apply interrupted after installing copies but before the receipt write
+// leaves correct copies behind a stale receipt; the next apply only records them.
+func TestInterruptedApplyRecoversReceiptOnly(t *testing.T) {
+	for _, stale := range []string{"legacy symlink", "different applied hash"} {
+		t.Run(stale, func(t *testing.T) {
+			home, repo := testEnvironment(t)
+			_, _, _ = Enroll(repo, "test", "", false)
+			if _, err := Apply("all", "test"); err != nil {
+				t.Fatal(err)
+			}
+			paths, _ := ResolvePaths()
+			receipt, _ := LoadReceipt(paths, Enrollment{})
+			before := map[string]os.FileInfo{}
+			for i, projection := range receipt.Projections {
+				before[projection.Destination], _ = os.Lstat(projection.Destination)
+				if stale == "legacy symlink" {
+					receipt.Projections[i].Strategy, receipt.Projections[i].AppliedHash, receipt.Projections[i].Origin = "symlink", "", ""
+				} else {
+					receipt.Projections[i].AppliedHash = strings.Repeat("0", 64)
+				}
+			}
+			if err := atomicJSON(paths.Receipt, receipt); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range mustPlan(t, "all").Actions {
+				if action.Action != "update" || action.Reason != recoverSkillReason {
+					t.Fatalf("recovery plan: %#v", action)
+				}
+			}
+			if _, err := Apply("all", "test"); err != nil {
+				t.Fatal(err)
+			}
+			recovered, _ := LoadReceipt(paths, Enrollment{})
+			for _, projection := range recovered.Projections {
+				info, err := os.Lstat(projection.Destination)
+				hash, _ := skillTreeHash(projection.Source)
+				if err != nil || !os.SameFile(info, before[projection.Destination]) || projection.Strategy != "copy" || projection.AppliedHash != hash || projection.Origin != "created" {
+					t.Fatalf("recovered projection: %#v %v", projection, err)
+				}
+			}
+			if !mustPlan(t, "all").Clean {
+				t.Fatal("plan after recovery is not clean")
+			}
+			assertNoSkillTemporaries(t, home)
+		})
+	}
+}
+
+func TestHoldInterruptsSurvivesSignalsAndReleases(t *testing.T) {
+	signals := []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP}
+	func() {
+		defer holdInterrupts()()
+		for _, sig := range signals {
+			if err := syscall.Kill(os.Getpid(), sig); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Signals sent to this process arrive well within this window.
+		time.Sleep(100 * time.Millisecond)
+	}()
+	for _, sig := range signals {
+		if signal.Ignored(sig) {
+			t.Fatalf("%v is still ignored after release", sig)
+		}
+	}
+}
+
+func TestDoctorWarnsOnInterruptedApplyLeftovers(t *testing.T) {
+	home, repo := testEnvironment(t)
+	_, _, _ = Enroll(repo, "test", "", false)
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	leftover := filepath.Join(home, ".agents", "skills", ".terran-old-x")
+	if err := os.Mkdir(leftover, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, check := range Doctor("test").Checks {
+		if check.Name == "interrupted_apply" {
+			if check.Status != "warn" || !strings.Contains(check.Message, leftover) || !strings.Contains(check.Message, "interrupted apply") {
+				t.Fatalf("leftover check: %#v", check)
+			}
+			found = true
+		}
+	}
+	if _, err := os.Lstat(leftover); err != nil || !found {
+		t.Fatalf("leftover not reported or removed: found=%v err=%v", found, err)
+	}
+}
+
+func TestManifestRejectsPrivateSkillEntries(t *testing.T) {
+	for name, mutate := range map[string]func(string) error{
+		"file":      func(source string) error { return os.Chmod(filepath.Join(source, "SKILL.md"), 0o600) },
+		"directory": func(source string) error { return os.Mkdir(filepath.Join(source, "private"), 0o700) },
+		"root":      func(source string) error { return os.Chmod(source, 0o711) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, repo := testEnvironment(t)
+			source := filepath.Join(repo, "skills", "example")
+			if err := mutate(source); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadManifest(repo); !hasCode(err, CodeManifestInvalid) || !strings.Contains(err.Error(), "world-readable") {
+				t.Fatalf("private skill entry accepted: %v", err)
+			}
+		})
 	}
 }
 

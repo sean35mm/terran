@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -551,6 +552,34 @@ func contentHash(path string) string {
 	return hashBytes([]byte(listing.String()))
 }
 
+// leftoverPrefixes name the siblings an apply creates beside a destination and
+// removes before it returns; one that remains means an apply was interrupted.
+var leftoverPrefixes = []string{".terran-tmp-", ".terran-old-", ".terran-quarantine-"}
+
+// leftovers lists the entries of dir whose names start with any prefix.
+func leftovers(dir string, prefixes ...string) []string {
+	entries, _ := os.ReadDir(dir)
+	var found []string
+	for _, entry := range entries {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(entry.Name(), prefix) {
+				found = append(found, filepath.Join(dir, entry.Name()))
+				break
+			}
+		}
+	}
+	return found
+}
+
+// leftoverQuarantine blocks a destination whose directory still holds a
+// quarantined file from an interrupted replacement.
+func leftoverQuarantine(destination string) error {
+	if found := leftovers(filepath.Dir(destination), ".terran-quarantine-"); len(found) > 0 {
+		return fmt.Errorf("leftover Terran quarantine found at %s; an earlier apply was interrupted — inspect it before continuing", found[0])
+	}
+	return nil
+}
+
 func classifyInstruction(paths Paths, action Action, sourceHash string, prior ReceiptManaged, owned bool) (string, string) {
 	if owned && prior.Destination != action.Destination {
 		return "blocked_drift", "CODEX_HOME changed"
@@ -559,6 +588,9 @@ func classifyInstruction(paths Paths, action Action, sourceHash string, prior Re
 		if owned {
 			return "blocked_drift", err.Error()
 		}
+		return "blocked_collision", err.Error()
+	}
+	if err := leftoverQuarantine(action.Destination); err != nil {
 		return "blocked_collision", err.Error()
 	}
 	parent := filepath.Dir(action.Destination)
@@ -657,6 +689,9 @@ func classifyInstructionRemoval(paths Paths, prior ReceiptManaged, destination s
 	if _, err := resolveDestination(paths, destination); err != nil {
 		return "blocked_drift", err.Error()
 	}
+	if err := leftoverQuarantine(destination); err != nil {
+		return "blocked_collision", err.Error()
+	}
 	if err := validateInstructionParent(destination); err != nil {
 		return "blocked_drift", err.Error()
 	}
@@ -740,6 +775,11 @@ func classifySkill(paths Paths, action Action, sourceHash string, prior ReceiptP
 	}
 	if owned {
 		if !ownedSkillIntact(action.Destination, prior) {
+			// An apply interrupted after installing the copy but before the
+			// receipt write leaves exactly the catalog content in place.
+			if hash, err := skillTreeHash(action.Destination); err == nil && hash == sourceHash {
+				return "update", recoverSkillReason
+			}
 			return "blocked_drift", "receipt-owned skill is missing or changed"
 		}
 		if prior.Strategy == "symlink" {
@@ -764,6 +804,10 @@ func classifySkill(paths Paths, action Action, sourceHash string, prior ReceiptP
 	}
 	return "blocked_collision", "destination exists and is not safely owned"
 }
+
+// recoverSkillReason marks an update that only records an already-installed
+// copy in the receipt.
+const recoverSkillReason = "recover interrupted apply (content already matches catalog)"
 
 // classifySkillRemoval plans an owned skill that is no longer desired: a
 // created copy or legacy link is removed, an adopted copy is released.
@@ -842,6 +886,15 @@ var (
 )
 
 var ErrApplyAborted = errors.New("apply aborted by user")
+
+// holdInterrupts captures and drops SIGINT, SIGTERM, and SIGHUP so rollback
+// or commit always completes; the returned release restores default handling.
+// signal.Ignore is not used because signal.Reset does not undo it.
+func holdInterrupts() (release func()) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	return func() { signal.Stop(signals) }
+}
 
 type resolvedCollision struct {
 	destinationInfo os.FileInfo
@@ -986,6 +1039,9 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				return err
 			}
 		}
+		// From the first mutation until the receipt commits or rolls back, an
+		// interrupt or SSH disconnect must not kill the process.
+		defer holdInterrupts()()
 		var skillRollbacks []skillRollback
 		for _, action := range result.Actions {
 			if action.Kind != "skill" || inert(action) {
@@ -1385,6 +1441,9 @@ func resolvableCollision(paths Paths, loaded LoadedManifest, action Action) (res
 	if _, err := resolveDestination(paths, action.Destination); err != nil {
 		return resolvedCollision{}, err
 	}
+	if err := leftoverQuarantine(action.Destination); err != nil {
+		return resolvedCollision{}, err
+	}
 	if err := validateInstructionParent(action.Destination); err != nil {
 		return resolvedCollision{}, err
 	}
@@ -1688,6 +1747,17 @@ func mutateSkill(catalogs Catalogs, action Action, owned map[string]ReceiptProje
 	}
 	root := filepath.Dir(action.Destination)
 	prior := owned[pairKey(action.Skill, action.Target)]
+	if action.Reason == recoverSkillReason {
+		// Nothing is written; the receipt records the copy already in place.
+		loaded, err := catalogs.catalog(action.Catalog)
+		if err != nil {
+			return err
+		}
+		if hash, err := skillTreeHash(action.Destination); err != nil || hash != loaded.SkillHashes[action.Skill] {
+			return fmt.Errorf("projection changed during apply")
+		}
+		return nil
+	}
 	if action.Action == "remove" {
 		old, err := setAsideSkill(action, prior)
 		rollback.old = old
@@ -1784,7 +1854,7 @@ func buildSkillCopy(loaded LoadedManifest, action Action) (string, error) {
 	if err := validateTrustedSource(loaded.Repository, action.Source); err != nil {
 		return "", err
 	}
-	entries, hash, err := readSkillTree(action.Source)
+	entries, hash, err := readSkillTree(action.Source, true)
 	if err == nil && hash != loaded.SkillHashes[action.Skill] {
 		err = fmt.Errorf("tree hash differs")
 	}

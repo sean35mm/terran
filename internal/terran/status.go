@@ -139,6 +139,18 @@ func Doctor(buildVersion string) DoctorResult {
 			add("target_"+target, "ok", root+" is a trusted real directory")
 		}
 	}
+	scanned := map[string]bool{}
+	for _, spec := range targetSpecs {
+		destination, err := spec.Dest(paths, "x")
+		dir := filepath.Dir(destination)
+		if err != nil || scanned[dir] {
+			continue
+		}
+		scanned[dir] = true
+		for _, leftover := range leftovers(dir, leftoverPrefixes...) {
+			add("interrupted_apply", "warn", leftover+" is left over from an interrupted apply; it is safe to inspect, and Terran does not delete it")
+		}
+	}
 	if receipt, err := LoadReceipt(paths, enrollment); errors.Is(err, os.ErrNotExist) {
 		add("instruction_receipt", "warn", "no instruction receipt exists yet")
 		add("config_receipt", "warn", "no config receipt exists yet")

@@ -283,6 +283,34 @@ func TestJSONKeysBlockUnsafeDestinations(t *testing.T) {
 	}
 }
 
+func TestLeftoverQuarantineBlocksEveryItemForItsDirectory(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	claudeSettings(t, home, `{}`, 0o644)
+	writeJSONKeysCatalog(t, repo, "test-catalog", []Instruction{{Target: "claude-global", Source: "instructions/CLAUDE.md"}}, map[string]string{"claude-settings": `{"model":"opus","theme":"dark"}`})
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	quarantine := filepath.Join(home, ".claude", ".terran-quarantine-123")
+	if err := os.Mkdir(quarantine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := mustPlan(t, "all")
+	for _, id := range []string{"instruction/claude-global", "json-keys/claude-settings/model", "json-keys/claude-settings/theme"} {
+		action := actionByIDOrFail(t, plan, id)
+		if action.Action != "blocked_collision" || !strings.Contains(action.Reason, "leftover Terran quarantine found at "+quarantine) {
+			t.Fatalf("%s not blocked by the leftover quarantine: %#v", id, action)
+		}
+	}
+	decisions := map[string]CollisionDecision{"instruction/claude-global": CollisionReplace, "json-keys/claude-settings/model": CollisionReplace}
+	if applied, err := ApplyWithOptions("all", "test", ApplyOptions{Decisions: decisions}); err != nil || !blocked(applied) {
+		t.Fatalf("replace decision bypassed the quarantine: %#v %v", applied, err)
+	}
+	if err := os.Remove(quarantine); err != nil {
+		t.Fatal(err)
+	}
+	assertJSONKeyPlan(t, map[string]string{"model": "create", "theme": "create"})
+}
+
 func TestJSONKeysSourceValidation(t *testing.T) {
 	cases := map[string]string{
 		"credential key":  `{"apiToken":"literal-value"}`,
