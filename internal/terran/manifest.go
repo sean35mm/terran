@@ -28,8 +28,11 @@ type LoadedManifest struct {
 	InstructionHashes  map[string]string
 	ConfigSources      map[string]string
 	ConfigHashes       map[string]string
-	FileSources        map[string]string // keyed by ItemID
-	FileHashes         map[string]string // keyed by ItemID
+	FileSources        map[string]string                     // keyed by ItemID
+	FileHashes         map[string]string                     // keyed by ItemID
+	JSONKeySources     map[string]string                     // keyed by target
+	JSONKeyHashes      map[string]string                     // keyed by target
+	JSONKeyValues      map[string]map[string]json.RawMessage // target -> key -> canonical value
 }
 
 func LoadManifest(repo string) (loaded LoadedManifest, err error) {
@@ -262,6 +265,9 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 		}
 		return manifest.Files[i].Source < manifest.Files[j].Source
 	})
+	jsonKeySources := make(map[string]string)
+	jsonKeyHashes := make(map[string]string)
+	jsonKeyValues := make(map[string]map[string]json.RawMessage)
 	for i := range manifest.JSONKeys {
 		item := &manifest.JSONKeys[i]
 		if _, ok := lookupTarget("json-keys", item.Target); !ok {
@@ -271,6 +277,31 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 			return LoadedManifest{}, fmt.Errorf("platforms for json-keys target %s: %w", item.Target, err)
 		}
 		sort.Strings(item.Platforms)
+		if _, exists := jsonKeySources[item.Target]; exists {
+			return LoadedManifest{}, fmt.Errorf("duplicate json-keys target %q", item.Target)
+		}
+		if item.Source == "" || filepath.IsAbs(item.Source) || filepath.Clean(item.Source) != item.Source || item.Source == "." || strings.HasPrefix(item.Source, ".."+string(filepath.Separator)) {
+			return LoadedManifest{}, fmt.Errorf("source for json-keys target %s must be a clean relative path", item.Target)
+		}
+		sourcePath := filepath.Join(canonicalRepo, item.Source)
+		canonicalSource, err := filepath.EvalSymlinks(sourcePath)
+		if err != nil || canonicalSource != sourcePath || !contained(canonicalRepo, canonicalSource) {
+			return LoadedManifest{}, fmt.Errorf("source for json-keys target %s is missing or escapes repository", item.Target)
+		}
+		if err := validateTrustedInstructionSource(canonicalRepo, canonicalSource); err != nil {
+			return LoadedManifest{}, fmt.Errorf("source for json-keys target %s: %w", item.Target, err)
+		}
+		data, _, err := readTrustedFile(canonicalSource, "json-keys source", instructionLimit, 0)
+		if err != nil {
+			return LoadedManifest{}, fmt.Errorf("source for json-keys target %s: %w", item.Target, err)
+		}
+		values, err := jsonKeyValuesFromSource(item.Target, data)
+		if err != nil {
+			return LoadedManifest{}, fmt.Errorf("source for json-keys target %s: %w", item.Target, err)
+		}
+		jsonKeySources[item.Target] = canonicalSource
+		jsonKeyHashes[item.Target] = hashBytes(data)
+		jsonKeyValues[item.Target] = values
 	}
 	sort.Slice(manifest.JSONKeys, func(i, j int) bool {
 		if manifest.JSONKeys[i].Target != manifest.JSONKeys[j].Target {
@@ -291,7 +322,7 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	sort.Slice(manifest.Tools, func(i, j int) bool { return manifest.Tools[i].Name < manifest.Tools[j].Name })
 	normalized, _ := json.Marshal(manifest)
 	sum := sha256.Sum256(normalized)
-	return LoadedManifest{manifest, canonicalRepo, hex.EncodeToString(sum[:]), sources, instructionSources, instructionHashes, configSources, configHashes, fileSources, fileHashes}, nil
+	return LoadedManifest{manifest, canonicalRepo, hex.EncodeToString(sum[:]), sources, instructionSources, instructionHashes, configSources, configHashes, fileSources, fileHashes, jsonKeySources, jsonKeyHashes, jsonKeyValues}, nil
 }
 
 func validatePlatforms(platforms []string) error {

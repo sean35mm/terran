@@ -277,6 +277,9 @@ func refuseOwnedOverlayChange(paths Paths, existing Enrollment) error {
 	for _, managed := range receipt.Managed {
 		owned = owned || managed.Catalog == existing.OverlayID
 	}
+	for _, entry := range receipt.JSONKeys {
+		owned = owned || entry.Catalog == existing.OverlayID
+	}
 	if owned {
 		return Coded(CodeRepositoryMismatch, "remove the overlay-owned items from the "+existing.OverlayID+" catalog and run terran apply before changing the overlay", fmt.Errorf("overlay %s still owns managed items", existing.OverlayID))
 	}
@@ -288,7 +291,7 @@ func retireEmptyReceipt(paths Paths, existing Enrollment) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("validate empty receipt before replacement: %w", err)
 	}
-	if len(receipt.Projections) != 0 || len(receipt.Managed) != 0 {
+	if len(receipt.Projections) != 0 || len(receipt.Managed) != 0 || len(receipt.JSONKeys) != 0 {
 		return "", fmt.Errorf("cannot replace enrollment while managed skills, instructions, or configs remain; decommission them or migrate ownership first")
 	}
 	if err := validateTrustedStateFile(paths.Receipt, "receipt.json"); err != nil {

@@ -18,22 +18,34 @@ var windowsAbsolutePathPattern = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
 var embeddedHTTPURLPattern = regexp.MustCompile("(?i)(?:^|[\\s=(:'\"\\[<{},])(https?://[^\\s\"'<>`]+)")
 
 func validateOpenCodeConfig(data []byte) error {
+	object, err := decodeJSONObject(data)
+	if err != nil {
+		return fmt.Errorf("config %w", err)
+	}
+	return validateConfigValue(object, "", "$")
+}
+
+// decodeJSONObject strictly decodes exactly one JSON object, rejecting
+// duplicate keys and trailing values. Numbers stay json.Number so canonical
+// re-encoding keeps their exact text.
+func decodeJSONObject(data []byte) (map[string]any, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	value, err := decodeUniqueJSONValue(dec, "$")
 	if err != nil {
-		return fmt.Errorf("config must be strict JSON: %w", err)
+		return nil, fmt.Errorf("must be strict JSON: %w", err)
 	}
-	if _, ok := value.(map[string]any); !ok {
-		return fmt.Errorf("config must be a JSON object")
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("must be a JSON object")
 	}
 	if token, err := dec.Token(); err != io.EOF {
 		if err == nil {
-			return fmt.Errorf("config has trailing JSON value %v", token)
+			return nil, fmt.Errorf("has trailing JSON value %v", token)
 		}
-		return fmt.Errorf("config has trailing JSON: %w", err)
+		return nil, fmt.Errorf("has trailing JSON: %w", err)
 	}
-	return validateConfigValue(value, "", "$")
+	return object, nil
 }
 
 // validateTextConfig screens a line-oriented text config such as TOML without

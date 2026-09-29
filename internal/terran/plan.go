@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -147,6 +148,32 @@ func LoadReceipt(paths Paths, enrollment Enrollment) (receipt Receipt, err error
 		default:
 			return Receipt{}, fmt.Errorf("invalid %s origin for %s", managed.Kind, managed.Target)
 		}
+	}
+	seen = map[string]bool{}
+	for _, entry := range receipt.JSONKeys {
+		_, known := catalogRepository(entry.Catalog)
+		_, supported := lookupTarget("json-keys", entry.Target)
+		id := ItemID("json-keys", entry.Target, entry.Key)
+		_, _, name, idErr := ParseItemID(id)
+		if !known || !supported || entry.Key == "" || idErr != nil || name != entry.Key || !validHash(entry.AppliedHash) {
+			return Receipt{}, fmt.Errorf("invalid receipt json key")
+		}
+		switch entry.Origin {
+		case "created":
+			if len(entry.OriginalValue) != 0 {
+				return Receipt{}, fmt.Errorf("invalid created json key receipt for %s", id)
+			}
+		case "adopted":
+			if len(entry.OriginalValue) == 0 || !json.Valid(entry.OriginalValue) {
+				return Receipt{}, fmt.Errorf("invalid adopted json key receipt for %s", id)
+			}
+		default:
+			return Receipt{}, fmt.Errorf("invalid json key origin for %s", id)
+		}
+		if seen[id] {
+			return Receipt{}, fmt.Errorf("duplicate receipt json key")
+		}
+		seen[id] = true
 	}
 	return receipt, nil
 }
@@ -317,6 +344,59 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 		action := Action{ID: id, Kind: prior.Kind, Catalog: prior.Catalog, Target: prior.Target, Name: prior.Name, Source: prior.Source, Destination: destination}
 		add(action, func() (string, string) { return classifyInstructionRemoval(paths, prior, destination) })
 	}
+	ownedJSONKeys := map[string]ReceiptJSONKey{}
+	for _, entry := range receipt.JSONKeys {
+		ownedJSONKeys[ItemID("json-keys", entry.Target, entry.Key)] = entry
+	}
+	// Each settings file is read at most once, and only when a key needs it.
+	jsonFiles := map[string]jsonSettings{}
+	inspect := func(target, destination string) jsonSettings {
+		file, ok := jsonFiles[target]
+		if !ok {
+			file = inspectJSONSettings(destination)
+			jsonFiles[target] = file
+		}
+		return file
+	}
+	desiredJSONKeys := map[string]bool{}
+	for _, loaded := range catalogs.list() {
+		for _, item := range loaded.Manifest.JSONKeys {
+			if !selectedManaged(filter, "json-keys", item.Target) {
+				continue
+			}
+			destination, _ := jsonKeysDestination(paths, item.Target)
+			if catalogs.insideAny(destination) {
+				return PlanResult{}, fmt.Errorf("json-keys destination for %s must not be inside a catalog repository", item.Target)
+			}
+			for key, value := range loaded.JSONKeyValues[item.Target] {
+				action := Action{ID: ItemID("json-keys", item.Target, key), Kind: "json-keys", Catalog: loaded.Manifest.ID, Target: item.Target, Name: key, Source: loaded.JSONKeySources[item.Target], Destination: destination}
+				prior, owned := ownedJSONKeys[action.ID]
+				if !platformIncluded(item.Platforms) {
+					if !owned {
+						add(action, excluded(item.Platforms))
+					}
+					continue
+				}
+				desiredJSONKeys[action.ID] = true
+				add(action, func() (string, string) {
+					return classifyJSONKey(inspect(item.Target, destination), key, value, prior, owned)
+				})
+			}
+		}
+	}
+	for id, prior := range ownedJSONKeys {
+		if !selectedManaged(filter, "json-keys", prior.Target) || desiredJSONKeys[id] {
+			continue
+		}
+		destination, _ := jsonKeysDestination(paths, prior.Target)
+		action := Action{ID: id, Kind: "json-keys", Catalog: prior.Catalog, Target: prior.Target, Name: prior.Key, Destination: destination}
+		if loaded, err := catalogs.catalog(prior.Catalog); err == nil {
+			action.Source = loaded.JSONKeySources[prior.Target]
+		}
+		add(action, func() (string, string) {
+			return classifyJSONKey(inspect(prior.Target, destination), prior.Key, nil, prior, true)
+		})
+	}
 	sort.Slice(actions, func(i, j int) bool {
 		if actions[i].Kind != actions[j].Kind {
 			return actions[i].Kind < actions[j].Kind
@@ -335,7 +415,11 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 			clean = false
 		}
 	}
-	return PlanResult{SchemaVersion: SchemaVersion, Clean: clean, Actions: actions}, nil
+	plan := PlanResult{SchemaVersion: SchemaVersion, Clean: clean, Actions: actions, jsonFiles: map[string]string{}}
+	for target, file := range jsonFiles {
+		plan.jsonFiles[target] = file.hash
+	}
+	return plan, nil
 }
 
 func classifyInstruction(paths Paths, action Action, sourceHash string, prior ReceiptManaged, owned bool) (string, string) {
@@ -663,6 +747,12 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				return err
 			}
 		}
+		jsonTargets := jsonTargetsToVerify(result)
+		for _, jsonTarget := range jsonTargets {
+			if _, _, err := verifyJSONSettings(paths, catalogs, result, jsonTarget); err != nil {
+				return err
+			}
+		}
 		var skillRollbacks []skillRollback
 		for _, action := range result.Actions {
 			if action.Kind != "skill" || inert(action) {
@@ -680,7 +770,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		var rollbacks []instructionRollback
 		verifiedInstructionHashes := map[string]string{}
 		for _, action := range result.Actions {
-			if action.Kind == "skill" || action.Action == "noop" || action.Action == "skip" || inert(action) {
+			if action.Kind == "skill" || action.Kind == "json-keys" || action.Action == "noop" || action.Action == "skip" || inert(action) {
 				continue
 			}
 			if err := preflightAction(paths, catalogs, action, ownedSkills, ownedInstructions, resolved); err != nil {
@@ -711,6 +801,13 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
 			}
 		}
+		for _, jsonTarget := range jsonTargets {
+			rollback, err := mutateJSONKeys(paths, catalogs, result, jsonTarget)
+			rollbacks = append(rollbacks, rollback)
+			if err != nil {
+				return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
+			}
+		}
 		if err := revalidateCatalogs(catalogs); err != nil {
 			return errors.Join(fmt.Errorf("revalidate catalog before receipt: %w", err), rollbackAll(rollbacks, skillRollbacks))
 		}
@@ -736,6 +833,14 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				}
 				verifiedInstructionHashes[item.id()] = hashBytes(data)
 			}
+			for _, item := range loaded.Manifest.JSONKeys {
+				if !selectedManaged(target, "json-keys", item.Target) || !platformIncluded(item.Platforms) {
+					continue
+				}
+				if _, err := readVerifiedManagedSource(loaded.Repository, "json-keys", item.Target, loaded.JSONKeySources[item.Target], loaded.JSONKeyHashes[item.Target]); err != nil {
+					return errors.Join(err, rollbackAll(rollbacks, skillRollbacks))
+				}
+			}
 		}
 		now := time.Now().UTC()
 		newReceipt := Receipt{SchemaVersion: SchemaVersion, RepositoryID: enrollment.RepositoryID, RepositoryPath: enrollment.RepositoryPath, RepositoryVersion: catalogs.Primary.Manifest.Version, ManifestFingerprint: catalogs.Fingerprint}
@@ -747,6 +852,14 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		for _, old := range receipt.Managed {
 			if !selectedManaged(target, old.Kind, old.Target) || heldIDs[ItemID(old.Kind, old.Target, old.Name)] {
 				newReceipt.Managed = append(newReceipt.Managed, old)
+			}
+		}
+		ownedJSONKeys := map[string]ReceiptJSONKey{}
+		for _, old := range receipt.JSONKeys {
+			id := ItemID("json-keys", old.Target, old.Key)
+			ownedJSONKeys[id] = old
+			if !selectedManaged(target, "json-keys", old.Target) || heldIDs[id] {
+				newReceipt.JSONKeys = append(newReceipt.JSONKeys, old)
 			}
 		}
 		for _, loaded := range catalogs.list() {
@@ -793,6 +906,24 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				}
 				newReceipt.Managed = append(newReceipt.Managed, ReceiptManaged{Kind: item.Kind, Catalog: loaded.Manifest.ID, Target: item.Target, Name: item.Name, Source: item.Source, Destination: destination, Strategy: "copy", SourceHash: sourceHash, AppliedHash: sourceHash, Origin: origin, OriginalHash: originalHash, OriginalMode: originalMode, Backup: backup, AppliedAt: now, TerranBuildVersion: buildVersion})
 			}
+			for _, item := range loaded.Manifest.JSONKeys {
+				if !selectedManaged(target, "json-keys", item.Target) {
+					continue
+				}
+				for key, value := range loaded.JSONKeyValues[item.Target] {
+					id := ItemID("json-keys", item.Target, key)
+					if untouched("json-keys", item.Target, key, item.Platforms) || actionByID(result, id).Action == "skip" {
+						continue
+					}
+					entry := ReceiptJSONKey{Catalog: loaded.Manifest.ID, Target: item.Target, Key: key, AppliedHash: hashBytes(value), Origin: "created", AppliedAt: now, TerranBuildVersion: buildVersion}
+					if prior, owned := ownedJSONKeys[id]; owned {
+						entry.Origin, entry.OriginalValue = prior.Origin, prior.OriginalValue
+					} else if actionByID(result, id).Action == "adopt" {
+						entry.Origin, entry.OriginalValue = "adopted", value
+					}
+					newReceipt.JSONKeys = append(newReceipt.JSONKeys, entry)
+				}
+			}
 		}
 		sort.Slice(newReceipt.Projections, func(i, j int) bool {
 			return pairKey(newReceipt.Projections[i].Skill, newReceipt.Projections[i].Target) < pairKey(newReceipt.Projections[j].Skill, newReceipt.Projections[j].Target)
@@ -803,6 +934,10 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				return pairKey(a.Kind, a.Target) < pairKey(b.Kind, b.Target)
 			}
 			return a.Name < b.Name
+		})
+		sort.Slice(newReceipt.JSONKeys, func(i, j int) bool {
+			a, b := newReceipt.JSONKeys[i], newReceipt.JSONKeys[j]
+			return pairKey(a.Target, a.Key) < pairKey(b.Target, b.Key)
 		})
 		priorReceipt, _, priorReceiptErr := readTrustedFile(paths.Receipt, "receipt", 4<<20, 0o600)
 		priorReceiptExisted := priorReceiptErr == nil
@@ -1074,6 +1209,10 @@ func preflightAction(paths Paths, catalogs Catalogs, action Action, ownedSkills 
 	loaded, err := catalogs.catalog(action.Catalog)
 	if err != nil {
 		return err
+	}
+	if action.Kind == "json-keys" {
+		// Verified per settings file by verifyJSONSettings.
+		return nil
 	}
 	if action.Kind == "skill" {
 		if source, desired := loaded.Sources[action.Skill]; desired && source == action.Source {

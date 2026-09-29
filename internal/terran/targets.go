@@ -102,6 +102,26 @@ var targetSpecs = []TargetSpec{
 		Mode:     0o644,
 		Validate: validateTextConfig,
 	},
+	{
+		ID:    "claude-settings",
+		Kind:  "json-keys",
+		Group: "claude",
+		Dest: func(p Paths, name string) (string, error) {
+			return filepath.Join(p.Home, ".claude", "settings.json"), nil
+		},
+		Mode:     0o644,
+		Validate: validateOpenCodeConfig,
+	},
+	{
+		ID:    "t3-settings",
+		Kind:  "json-keys",
+		Group: "t3",
+		Dest: func(p Paths, name string) (string, error) {
+			return filepath.Join(p.Home, ".t3", "userdata", "settings.json"), nil
+		},
+		Mode:     0o644,
+		Validate: validateOpenCodeConfig,
+	},
 	fileTarget("claude-agent", "claude", 0o644, []string{".md"}, func(p Paths) string { return filepath.Join(p.Home, ".claude", "agents") }),
 	fileTarget("claude-command", "claude", 0o644, []string{".md"}, func(p Paths) string { return filepath.Join(p.Home, ".claude", "commands") }),
 	fileTarget("claude-hook", "claude", 0o755, nil, func(p Paths) string { return filepath.Join(p.Home, ".claude", "hooks") }),

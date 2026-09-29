@@ -25,7 +25,7 @@ func Status(target string) (StatusResult, error) {
 			item.Status = "missing"
 		case "adopt", "replace", "record", "update":
 			item.Status = "pending"
-		case "remove", "restore":
+		case "remove", "restore", "release":
 			item.Status = "orphaned"
 		case "blocked_collision":
 			item.Status = "collision"

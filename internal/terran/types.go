@@ -1,6 +1,9 @@
 package terran
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 const SchemaVersion = 2
 
@@ -72,6 +75,20 @@ type Receipt struct {
 	ManifestFingerprint string              `json:"manifest_fingerprint"`
 	Projections         []ReceiptProjection `json:"projections"`
 	Managed             []ReceiptManaged    `json:"managed,omitempty"`
+	JSONKeys            []ReceiptJSONKey    `json:"json_keys,omitempty"`
+}
+
+// ReceiptJSONKey records one owned top-level key in a shared JSON settings
+// file. Hashes are sha256 over the canonical JSON of the value.
+type ReceiptJSONKey struct {
+	Catalog            string          `json:"catalog"`
+	Target             string          `json:"target"`
+	Key                string          `json:"key"`
+	AppliedHash        string          `json:"applied_hash"`
+	Origin             string          `json:"origin"`
+	OriginalValue      json.RawMessage `json:"original_value,omitempty"`
+	AppliedAt          time.Time       `json:"applied_at"`
+	TerranBuildVersion string          `json:"terran_build_version"`
 }
 
 type ReceiptManaged struct {
@@ -120,6 +137,10 @@ type PlanResult struct {
 	SchemaVersion int      `json:"schema_version"`
 	Clean         bool     `json:"clean"`
 	Actions       []Action `json:"actions"`
+	// jsonFiles maps each json-keys target the plan inspected to the sha256
+	// of the whole settings file ("" when missing); apply refuses to write
+	// if the file no longer matches.
+	jsonFiles map[string]string
 }
 
 type CollisionDecision string
