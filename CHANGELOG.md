@@ -2,7 +2,7 @@
 
 All notable changes are documented here. Terran follows semantic versioning.
 
-## 0.4.0 - Unreleased
+## 0.4.0 - 2026-09-29
 
 Breaking:
 
