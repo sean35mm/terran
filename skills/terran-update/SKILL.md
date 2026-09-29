@@ -8,7 +8,7 @@ description: Plan a Terran binary or catalog update across one or more Command C
 Terran has no self-updater and never fetches a catalog. Two things update separately, each with the user's approval, and neither is applied silently:
 
 1. **The binary.** Install an exact release the user names (`install.sh vX.Y.Z`, after reading the script and verifying it downloads `SHA256SUMS`) or build a reviewed source revision. Never resolve "latest" yourself.
-2. **The catalogs** (public and private overlay). `git fetch`, then review the diff before checking out: `terran.json`, every changed `SKILL.md`, instruction and config sources, provenance, licenses. Skills are live symlinks, so a checkout changes them immediately; instructions, configs, files, and settings keys change only through `terran apply`. Never push.
+2. **The catalogs** (public and private overlay). `git fetch`, then review the diff before checking out: `terran.json`, every changed `SKILL.md`, instruction and config sources, provenance, licenses. A checkout changes nothing on the machine: skills (managed directory copies), instructions, configs, files, and settings keys change only through `terran apply`. The first 0.4 apply on a machine applied with 0.3 converts its skill symlinks to copies (`update`, `convert live symlink to managed copy`). Never push.
 
 ## Schema v2
 

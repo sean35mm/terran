@@ -680,8 +680,11 @@ func TestDecideReplaceBacksUpAndInstallsCatalogVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 		source := actionByIDOrFail(t, mustPlan(t, "agents"), "skill/agents/example").Source
-		if !exactSymlink(destination, source) {
-			t.Fatal("catalog skill was not projected")
+		if !skillCopied(destination, source) {
+			t.Fatal("catalog skill was not copied")
+		}
+		if projections := loadTestReceipt(t).Projections; len(projections) != 1 || projections[0].Strategy != "copy" || projections[0].Origin != "created" {
+			t.Fatalf("receipt: %#v", projections)
 		}
 		if got, _ := os.ReadFile(filepath.Join(paths.BackupDir, "skill", "agents", "example", "original", "mine.txt")); string(got) != "mine" {
 			t.Fatalf("skill backup: %q", got)
@@ -873,7 +876,7 @@ func TestPlanDigestAndExpect(t *testing.T) {
 		t.Fatalf("stale digest wrote a receipt: %v", err)
 	}
 	result, err := ApplyWithOptions("all", "test", ApplyOptions{ExpectDigest: first.Digest})
-	if err != nil || result.Digest != first.Digest || !exactSymlink(destination, actionByIDOrFail(t, first, "skill/agents/example").Source) {
+	if err != nil || result.Digest != first.Digest || !skillCopied(destination, actionByIDOrFail(t, first, "skill/agents/example").Source) {
 		t.Fatalf("matching digest: %#v %v", result, err)
 	}
 	if err := os.WriteFile(filepath.Join(repo, "skills", "example", "SKILL.md"), []byte("---\nname: example\ndescription: changed\n---\n"), 0o644); err != nil {

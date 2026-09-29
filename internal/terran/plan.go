@@ -94,7 +94,9 @@ func LoadReceipt(paths Paths, enrollment Enrollment) (receipt Receipt, err error
 	seen := map[string]bool{}
 	for _, p := range receipt.Projections {
 		repository, known := catalogRepository(p.Catalog)
-		if !known || !skillNamePattern.MatchString(p.Skill) || p.Strategy != "symlink" || !filepath.IsAbs(p.Source) {
+		validStrategy := (p.Strategy == "copy" && validHash(p.AppliedHash) && (p.Origin == "created" || p.Origin == "adopted")) ||
+			(p.Strategy == "symlink" && p.AppliedHash == "" && p.Origin == "")
+		if !known || !skillNamePattern.MatchString(p.Skill) || !validStrategy || !filepath.IsAbs(p.Source) {
 			return Receipt{}, fmt.Errorf("invalid receipt projection")
 		}
 		if _, ok := lookupTarget("skill", p.Target); !ok {
@@ -299,7 +301,7 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 				}
 				desiredSkills[key] = true
 				add(action, func() (string, string) {
-					return classifyLeaf(filepath.Dir(action.Destination), action.Destination, action.Source, prior, owned)
+					return classifySkill(paths, action, loaded.SkillHashes[projection.Skill], prior, owned)
 				})
 			}
 		}
@@ -310,12 +312,7 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 		}
 		destination, _ := skillDestination(paths, prior.Target, prior.Skill)
 		action := Action{ID: ItemID("skill", prior.Target, prior.Skill), Kind: "skill", Catalog: prior.Catalog, Skill: prior.Skill, Target: prior.Target, Source: prior.Source, Destination: destination}
-		add(action, func() (string, string) {
-			if exactSymlink(action.Destination, prior.Source) {
-				return "remove", ""
-			}
-			return "blocked_drift", "receipt-owned projection is missing or changed"
-		})
+		add(action, func() (string, string) { return classifySkillRemoval(paths, prior, action.Destination) })
 	}
 	// Two desired items must never write one path, e.g. when CODEX_HOME points
 	// at another harness's directory.
@@ -685,7 +682,16 @@ func validateBackup(paths Paths, prior ReceiptManaged) error {
 	return nil
 }
 
-func classifyLeaf(root, destination, desired string, prior ReceiptProjection, owned bool) (string, string) {
+// classifySkill plans a desired skill as a managed directory copy of a source
+// whose tree hash is sourceHash.
+func classifySkill(paths Paths, action Action, sourceHash string, prior ReceiptProjection, owned bool) (string, string) {
+	if _, err := resolveDestination(paths, action.Destination); err != nil {
+		if owned {
+			return "blocked_drift", err.Error()
+		}
+		return "blocked_collision", err.Error()
+	}
+	root := filepath.Dir(action.Destination)
 	rootInfo, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
 		if owned {
@@ -700,25 +706,58 @@ func classifyLeaf(root, destination, desired string, prior ReceiptProjection, ow
 		return "blocked_collision", err.Error()
 	}
 	if owned {
-		if !exactSymlink(destination, prior.Source) {
-			return "blocked_drift", "receipt-owned projection is missing or changed"
+		if !ownedSkillIntact(action.Destination, prior) {
+			return "blocked_drift", "receipt-owned skill is missing or changed"
 		}
-		if prior.Source == desired {
+		if prior.Strategy == "symlink" {
+			return "update", "convert live symlink to managed copy"
+		}
+		if prior.AppliedHash == sourceHash {
 			return "noop", ""
 		}
-		return "replace", "manifest source changed"
+		return "update", "skill source changed"
 	}
-	_, err = os.Lstat(destination)
+	info, err := os.Lstat(action.Destination)
 	if errors.Is(err, os.ErrNotExist) {
 		return "create", ""
 	}
 	if err != nil {
 		return "blocked_collision", err.Error()
 	}
-	if exactSymlink(destination, desired) {
-		return "adopt", "existing exact symlink"
+	if info.IsDir() {
+		if hash, err := skillTreeHash(action.Destination); err == nil && hash == sourceHash {
+			return "adopt", "existing identical directory"
+		}
 	}
 	return "blocked_collision", "destination exists and is not safely owned"
+}
+
+// classifySkillRemoval plans an owned skill that is no longer desired: a
+// created copy or legacy link is removed, an adopted copy is released.
+func classifySkillRemoval(paths Paths, prior ReceiptProjection, destination string) (string, string) {
+	if _, err := resolveDestination(paths, destination); err != nil {
+		return "blocked_drift", err.Error()
+	}
+	if err := validateTargetRoot(filepath.Dir(destination)); err != nil {
+		return "blocked_drift", err.Error()
+	}
+	if !ownedSkillIntact(destination, prior) {
+		return "blocked_drift", "receipt-owned skill is missing or changed"
+	}
+	if prior.Origin == "adopted" {
+		return "release", "adopted skill is no longer in manifest; Terran stops managing it and keeps the directory"
+	}
+	return "remove", "skill is no longer in manifest"
+}
+
+// ownedSkillIntact reports whether a destination is exactly what the receipt
+// recorded: the legacy link, or a copy with the applied tree hash.
+func ownedSkillIntact(destination string, prior ReceiptProjection) bool {
+	if prior.Strategy == "symlink" {
+		return exactSymlink(destination, prior.Source)
+	}
+	hash, err := skillTreeHash(destination)
+	return err == nil && hash == prior.AppliedHash
 }
 
 func exactSymlink(path, expected string) bool {
@@ -764,6 +803,7 @@ var (
 	beforeReplacementCleanup  func(string) error
 	beforeBackupPublish       func(string) error
 	afterBackupPublication    func(string) error
+	afterSkillInstall         func(Action) error
 	restoreReceiptFile        = restoreReceiptSnapshot
 	removeInstructionBackup   = safelyRemoveInstructionBackup
 )
@@ -921,9 +961,8 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			if err := preflightAction(paths, catalogs, action, ownedSkills, ownedInstructions, resolved); err != nil {
 				return errors.Join(err, rollbackSkills(skillRollbacks))
 			}
-			rollback := prepareSkillRollback(action, ownedSkills, resolved)
-			skillRollbacks = append(skillRollbacks, rollback)
-			if err := mutateSkill(paths, catalogs, action, ownedSkills, resolved); err != nil {
+			skillRollbacks = append(skillRollbacks, prepareSkillRollback(action, resolved))
+			if err := mutateSkill(catalogs, action, ownedSkills, resolved, &skillRollbacks[len(skillRollbacks)-1]); err != nil {
 				return errors.Join(err, rollbackSkills(skillRollbacks))
 			}
 		}
@@ -1027,7 +1066,15 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 						continue
 					}
 					destination, _ := skillDestination(paths, destinationTarget, projection.Skill)
-					newReceipt.Projections = append(newReceipt.Projections, ReceiptProjection{Catalog: loaded.Manifest.ID, Skill: projection.Skill, Target: destinationTarget, Source: loaded.Sources[projection.Skill], Destination: destination, Strategy: "symlink", AppliedAt: now, TerranBuildVersion: buildVersion})
+					// Created copies, collision replacements, and converted
+					// legacy links are removed with the item; adopted copies are released.
+					origin := "created"
+					if prior, owned := ownedSkills[pairKey(projection.Skill, destinationTarget)]; owned && prior.Strategy == "copy" {
+						origin = prior.Origin
+					} else if !owned && actionByID(result, ItemID("skill", destinationTarget, projection.Skill)).Action == "adopt" {
+						origin = "adopted"
+					}
+					newReceipt.Projections = append(newReceipt.Projections, ReceiptProjection{Catalog: loaded.Manifest.ID, Skill: projection.Skill, Target: destinationTarget, Source: loaded.Sources[projection.Skill], Destination: destination, Strategy: "copy", AppliedHash: loaded.SkillHashes[projection.Skill], Origin: origin, AppliedAt: now, TerranBuildVersion: buildVersion})
 				}
 			}
 			for _, item := range loaded.managedItems() {
@@ -1133,6 +1180,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				return errors.Join(writeErr, rollbackAll(rollbacks, skillRollbacks))
 			}
 		}
+		removeSetAsideSkills(&result, skillRollbacks)
 		for _, action := range result.Actions {
 			if action.Kind == "skill" || action.Kind == "json-keys" || action.Action != "restore" {
 				continue
@@ -1362,6 +1410,9 @@ func resolvableSkillCollision(paths Paths, loaded LoadedManifest, action Action)
 	} else if err := validateTrustedSource(loaded.Repository, source); err != nil {
 		return resolvedCollision{}, err
 	}
+	if _, err := resolveDestination(paths, action.Destination); err != nil {
+		return resolvedCollision{}, err
+	}
 	if err := validateTargetRoot(filepath.Dir(action.Destination)); err != nil {
 		return resolvedCollision{}, err
 	}
@@ -1480,13 +1531,13 @@ func preflightAction(paths Paths, catalogs Catalogs, action Action, ownedSkills 
 				return err
 			}
 		}
-		if action.Action == "remove" {
-			if !exactSymlink(action.Destination, action.Source) {
-				return fmt.Errorf("projection changed during apply")
-			}
-			return nil
+		prior, owned := ownedSkills[pairKey(action.Skill, action.Target)]
+		var fresh string
+		if action.Action == "remove" || action.Action == "release" {
+			fresh, _ = classifySkillRemoval(paths, prior, action.Destination)
+		} else {
+			fresh, _ = classifySkill(paths, action, loaded.SkillHashes[action.Skill], prior, owned)
 		}
-		fresh, _ := classifyLeaf(filepath.Dir(action.Destination), action.Destination, action.Source, ownedSkills[pairKey(action.Skill, action.Target)], ownedSkills[pairKey(action.Skill, action.Target)].Skill != "")
 		if fresh != action.Action && !(action.Action == "record" && fresh == "noop") {
 			return fmt.Errorf("projection changed during apply")
 		}
@@ -1519,22 +1570,20 @@ func preflightAction(paths Paths, catalogs Catalogs, action Action, ownedSkills 
 	return nil
 }
 
+// skillRollback records how one skill mutation changed its destination.
 type skillRollback struct {
-	action       string
-	destination  string
-	beforeSource string
-	afterSource  string
-	createdDirs  []string
-	backup       string // collision replacement: where the original was moved
+	id          string
+	destination string
+	installed   os.FileInfo // the copy Terran renamed into place, if any
+	old         string      // update or removal: where the prior destination was set aside
+	backup      string      // collision replacement: where the original was moved
+	createdDirs []string
 }
 
-func prepareSkillRollback(action Action, owned map[string]ReceiptProjection, resolved map[string]resolvedCollision) skillRollback {
-	rollback := skillRollback{action: action.Action, destination: action.Destination, afterSource: action.Source}
+func prepareSkillRollback(action Action, resolved map[string]resolvedCollision) skillRollback {
+	rollback := skillRollback{id: action.ID, destination: action.Destination}
 	if state, ok := resolved[managedActionKey(action)]; ok && action.Action == "replace" {
 		rollback.backup = state.backup
-	}
-	if prior := owned[pairKey(action.Skill, action.Target)]; prior.Skill != "" {
-		rollback.beforeSource = prior.Source
 	}
 	if action.Action == "create" {
 		for current := filepath.Dir(action.Destination); ; current = filepath.Dir(current) {
@@ -1553,93 +1602,228 @@ func rollbackSkills(rollbacks []skillRollback) error {
 	var rollbackErrs []error
 	for i := len(rollbacks) - 1; i >= 0; i-- {
 		rollback := rollbacks[i]
-		switch rollback.action {
-		case "create":
-			if exactSymlink(rollback.destination, rollback.afterSource) {
-				if err := os.Remove(rollback.destination); err != nil {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback created projection %s: %w", rollback.destination, err))
+		if rollback.installed != nil {
+			if info, err := os.Lstat(rollback.destination); err == nil && os.SameFile(info, rollback.installed) {
+				if err := os.RemoveAll(rollback.destination); err != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback installed skill %s: %w", rollback.destination, err))
 				}
 			}
-			for _, dir := range rollback.createdDirs {
-				if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback projection directory %s: %w", dir, err))
+		}
+		for _, displaced := range []string{rollback.old, rollback.backup} {
+			if displaced == "" {
+				continue
+			}
+			_, destinationErr := os.Lstat(rollback.destination)
+			if _, err := os.Lstat(displaced); err == nil && errors.Is(destinationErr, os.ErrNotExist) {
+				if err := os.Rename(displaced, rollback.destination); err != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback displaced skill %s: %w", rollback.destination, err))
 				}
 			}
-		case "replace":
-			if rollback.backup != "" {
-				if exactSymlink(rollback.destination, rollback.afterSource) {
-					if err := os.Remove(rollback.destination); err != nil {
-						rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback replacement projection %s: %w", rollback.destination, err))
-					}
-				}
-				_, destinationErr := os.Lstat(rollback.destination)
-				if _, backupErr := os.Lstat(rollback.backup); backupErr == nil && errors.Is(destinationErr, os.ErrNotExist) {
-					if err := os.Rename(rollback.backup, rollback.destination); err != nil {
-						rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback replaced skill %s: %w", rollback.destination, err))
-					}
-				}
-			} else if exactSymlink(rollback.destination, rollback.afterSource) {
-				if err := replaceSymlink(rollback.beforeSource, rollback.destination); err != nil {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback replaced projection %s: %w", rollback.destination, err))
-				}
-			}
-		case "remove":
-			if _, err := os.Lstat(rollback.destination); errors.Is(err, os.ErrNotExist) {
-				if err := os.Symlink(rollback.beforeSource, rollback.destination); err != nil {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback removed projection %s: %w", rollback.destination, err))
-				}
+		}
+		for _, dir := range rollback.createdDirs {
+			if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("rollback projection directory %s: %w", dir, err))
 			}
 		}
 	}
 	return errors.Join(rollbackErrs...)
 }
 
-func mutateSkill(paths Paths, catalogs Catalogs, action Action, owned map[string]ReceiptProjection, resolved map[string]resolvedCollision) error {
-	if action.Action == "noop" || action.Action == "record" || action.Action == "adopt" {
+// removeSetAsideSkills deletes the destinations that updates and removals set
+// aside, once the receipt no longer references them.
+func removeSetAsideSkills(result *PlanResult, rollbacks []skillRollback) {
+	for _, rollback := range rollbacks {
+		if rollback.old == "" {
+			continue
+		}
+		if err := os.RemoveAll(rollback.old); err != nil {
+			appendActionWarning(result, Action{ID: rollback.id}, "cleanup warning: "+err.Error())
+		}
+	}
+}
+
+// mutateSkill creates, updates, replaces, or removes one skill copy. A new
+// copy is built and verified beside the destination before anything is
+// displaced, and displaced destinations are set aside until the receipt
+// commits. rollback records each step as it happens.
+func mutateSkill(catalogs Catalogs, action Action, owned map[string]ReceiptProjection, resolved map[string]resolvedCollision, rollback *skillRollback) error {
+	if action.Action != "create" && action.Action != "update" && action.Action != "replace" && action.Action != "remove" {
 		return nil
 	}
 	if err := revalidateCatalogs(catalogs); err != nil {
 		return err
 	}
-	switch action.Action {
-	case "create", "replace":
-		root := filepath.Dir(action.Destination)
-		if err := ensureTargetRoot(root); err != nil {
+	root := filepath.Dir(action.Destination)
+	prior := owned[pairKey(action.Skill, action.Target)]
+	if action.Action == "remove" {
+		old, err := setAsideSkill(action, prior)
+		rollback.old = old
+		if err != nil {
 			return err
 		}
-		if action.Action == "create" {
-			if _, err := os.Lstat(action.Destination); !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("projection changed during apply")
-			}
-			if err := os.Symlink(action.Source, action.Destination); err != nil {
-				return err
-			}
-		} else if state, collision := resolved[managedActionKey(action)]; collision {
-			// Collision replacement: move the unowned skill aside, then project.
-			if info, err := os.Lstat(action.Destination); err != nil || !os.SameFile(info, state.destinationInfo) {
-				return fmt.Errorf("projection changed during apply")
-			}
-			if err := ensurePrivateDir(filepath.Dir(state.backup)); err != nil {
-				return err
-			}
-			if err := os.Rename(action.Destination, state.backup); err != nil {
-				return fmt.Errorf("backup not possible: %w", err)
-			}
-			if err := os.Symlink(action.Source, action.Destination); err != nil {
-				return err
-			}
-		} else if prior := owned[pairKey(action.Skill, action.Target)]; !exactSymlink(action.Destination, prior.Source) {
-			return fmt.Errorf("projection changed during apply")
-		} else if err := replaceSymlink(action.Source, action.Destination); err != nil {
-			return err
-		}
-	case "remove":
-		if !exactSymlink(action.Destination, action.Source) {
-			return fmt.Errorf("projection changed during apply")
-		}
-		return os.Remove(action.Destination)
+		return syncDirectory(root)
 	}
-	return nil
+	if err := ensureTargetRoot(root); err != nil {
+		return err
+	}
+	loaded, err := catalogs.catalog(action.Catalog)
+	if err != nil {
+		return err
+	}
+	temp, err := buildSkillCopy(loaded, action)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if temp != "" {
+			_ = os.RemoveAll(temp)
+		}
+	}()
+	switch action.Action {
+	case "create":
+		if _, err := os.Lstat(action.Destination); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("projection changed during apply")
+		}
+	case "update":
+		old, err := setAsideSkill(action, prior)
+		rollback.old = old
+		if err != nil {
+			return err
+		}
+	case "replace":
+		// Collision replacement: move the unowned skill into a private backup.
+		state, collision := resolved[managedActionKey(action)]
+		if !collision {
+			return fmt.Errorf("projection changed during apply")
+		}
+		if info, err := os.Lstat(action.Destination); err != nil || !os.SameFile(info, state.destinationInfo) {
+			return fmt.Errorf("projection changed during apply")
+		}
+		if err := ensurePrivateDir(filepath.Dir(state.backup)); err != nil {
+			return err
+		}
+		if err := os.Rename(action.Destination, state.backup); err != nil {
+			return fmt.Errorf("backup not possible: %w", err)
+		}
+	}
+	if err := os.Rename(temp, action.Destination); err != nil {
+		return err
+	}
+	temp = ""
+	info, err := os.Lstat(action.Destination)
+	if err != nil {
+		return err
+	}
+	rollback.installed = info
+	if afterSkillInstall != nil {
+		if err := afterSkillInstall(action); err != nil {
+			return err
+		}
+	}
+	return syncDirectory(root)
+}
+
+// setAsideSkill renames an owned destination that is exactly what the
+// receipt recorded to a hidden sibling, and checks it again there.
+func setAsideSkill(action Action, prior ReceiptProjection) (string, error) {
+	if !ownedSkillIntact(action.Destination, prior) {
+		return "", fmt.Errorf("projection changed during apply")
+	}
+	id, err := randomID()
+	if err != nil {
+		return "", err
+	}
+	old := filepath.Join(filepath.Dir(action.Destination), ".terran-old-"+action.Skill+"-"+strings.TrimPrefix(id, "cc-"))
+	if err := os.Rename(action.Destination, old); err != nil {
+		return "", err
+	}
+	if !ownedSkillIntact(old, prior) {
+		return old, fmt.Errorf("projection changed during apply")
+	}
+	return old, nil
+}
+
+// buildSkillCopy re-reads a skill source through the trusted readers,
+// requires the tree hash the plan saw, and writes a copy with normalized modes
+// into a hidden temporary directory beside the destination. Every file and
+// directory is synced and the copy's tree hash is verified.
+func buildSkillCopy(loaded LoadedManifest, action Action) (string, error) {
+	if err := validateTrustedSource(loaded.Repository, action.Source); err != nil {
+		return "", err
+	}
+	entries, hash, err := readSkillTree(action.Source)
+	if err == nil && hash != loaded.SkillHashes[action.Skill] {
+		err = fmt.Errorf("tree hash differs")
+	}
+	if err != nil {
+		return "", Coded(CodePlanChanged, "run terran plan again", fmt.Errorf("%s changed since it was planned: %w", action.Source, err))
+	}
+	if err := validateTrustedSource(loaded.Repository, action.Source); err != nil {
+		return "", err
+	}
+	temp, err := os.MkdirTemp(filepath.Dir(action.Destination), ".terran-tmp-"+action.Skill+"-*")
+	if err != nil {
+		return "", err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.RemoveAll(temp)
+		}
+	}()
+	// Entries are sorted, so every directory precedes its contents.
+	for _, entry := range entries {
+		path := filepath.Join(temp, filepath.FromSlash(entry.path))
+		if entry.dir {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				return "", err
+			}
+			continue
+		}
+		if err := writeSkillFile(path, entry.data, entry.mode); err != nil {
+			return "", err
+		}
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].dir {
+			path := filepath.Join(temp, filepath.FromSlash(entries[i].path))
+			if err := os.Chmod(path, 0o755); err != nil {
+				return "", err
+			}
+			if err := syncDirectory(path); err != nil {
+				return "", err
+			}
+		}
+	}
+	if err := os.Chmod(temp, 0o755); err != nil {
+		return "", err
+	}
+	if err := syncDirectory(temp); err != nil {
+		return "", err
+	}
+	if written, err := skillTreeHash(temp); err != nil || written != hash {
+		return "", fmt.Errorf("skill copy verification failed for %s", action.Destination)
+	}
+	ok = true
+	return temp, nil
+}
+
+func writeSkillFile(path string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 type instructionRollback struct {
@@ -2281,16 +2465,4 @@ func syncDirectory(path string) error {
 	}
 	defer dir.Close()
 	return dir.Sync()
-}
-
-func replaceSymlink(source, destination string) error {
-	tmp := filepath.Join(filepath.Dir(destination), ".terran-"+filepath.Base(destination)+fmt.Sprintf("-%d", os.Getpid()))
-	if err := os.Symlink(source, tmp); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, destination); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
 }

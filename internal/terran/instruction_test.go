@@ -532,13 +532,11 @@ func TestV03StateUpgradeDoesNotRewriteManagedDestinations(t *testing.T) {
 	if _, err := Apply("all", "0.3.0"); err != nil {
 		t.Fatal(err)
 	}
+	// v0.3 projected skills as live symlinks.
+	receipt := writeLegacySkillState(t)
 
 	paths, _ := ResolvePaths()
 	enrollment, err := LoadEnrollment(paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	receipt, err := LoadReceipt(paths, Enrollment{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -597,9 +595,11 @@ func TestV03StateUpgradeDoesNotRewriteManagedDestinations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	destinations := []string{
+	skills := []string{
 		filepath.Join(home, ".agents", "skills", "example"),
 		filepath.Join(home, ".claude", "skills", "example"),
+	}
+	destinations := []string{
 		filepath.Join(home, ".claude", "CLAUDE.md"),
 		filepath.Join(home, "config", "opencode", "AGENTS.md"),
 	}
@@ -615,15 +615,26 @@ func TestV03StateUpgradeDoesNotRewriteManagedDestinations(t *testing.T) {
 	if loaded.Fingerprint == v1Receipt.ManifestFingerprint {
 		t.Fatal("test fixture did not exercise a changed normalized v2 fingerprint")
 	}
+	// Instruction files stay noop; the one-time skill conversion is the only change.
 	plan, err := Plan("all")
-	if err != nil || len(plan.Actions) != len(destinations) || actionCount(plan, "noop") != len(destinations) {
-		t.Fatalf("v0.3 plan was not all noop: %#v %v", plan, err)
+	if err != nil || len(plan.Actions) != len(destinations)+len(skills) || actionCount(plan, "noop") != len(destinations) {
+		t.Fatalf("v0.3 instruction plan was not noop: %#v %v", plan, err)
+	}
+	for _, action := range plan.Actions {
+		if action.Kind == "skill" && (action.Action != "update" || action.Reason != "convert live symlink to managed copy") {
+			t.Fatalf("v0.3 skill was not planned for conversion: %#v", action)
+		}
 	}
 	if _, err := Apply("all", "0.4.0"); err != nil {
 		t.Fatal(err)
 	}
 	for _, destination := range destinations {
 		assertManagedDestinationUnchanged(t, destination, before[destination], snapshotManagedDestination(t, destination))
+	}
+	for _, destination := range skills {
+		if !skillCopied(destination, loaded.Sources["example"]) {
+			t.Fatalf("legacy link was not converted to an identical copy: %s", destination)
+		}
 	}
 
 	afterManifest, _ := os.ReadFile(filepath.Join(repo, "terran.json"))
@@ -640,7 +651,7 @@ func TestV03StateUpgradeDoesNotRewriteManagedDestinations(t *testing.T) {
 		t.Fatalf("upgraded receipt invalid: %#v %v", upgraded, err)
 	}
 	for _, projection := range upgraded.Projections {
-		if projection.Catalog != upgraded.RepositoryID {
+		if projection.Catalog != upgraded.RepositoryID || projection.Strategy != "copy" {
 			t.Fatalf("projection catalog not set: %#v", projection)
 		}
 	}
@@ -733,18 +744,14 @@ func TestSkillMutationsRollbackOnInstructionAndReceiptFailures(t *testing.T) {
 		}},
 		{"receipt", func() { beforeReceiptWrite = func() error { return errors.New("forced receipt failure") } }},
 	}
-	for _, action := range []string{"create", "replace", "remove"} {
+	for _, action := range []string{"create", "update", "remove"} {
 		for _, failure := range failures {
 			t.Run(action+"/"+failure.name, func(t *testing.T) {
 				home, repo := instructionEnvironment(t)
 				projection := Projection{Skill: "example", Source: "skills/example", Targets: []string{"agents"}}
 				instruction := Instruction{Target: "claude-global", Source: "instructions/claude.md"}
 				prepareInstructionParents(t)
-				if action == "create" {
-					writeCatalogWithInstructions(t, repo, []Projection{projection}, []Instruction{instruction})
-				} else {
-					writeCatalogWithInstructions(t, repo, []Projection{projection}, []Instruction{instruction})
-				}
+				writeCatalogWithInstructions(t, repo, []Projection{projection}, []Instruction{instruction})
 				_, _, _ = Enroll(repo, "test", "", false)
 				paths, _ := ResolvePaths()
 				destination := filepath.Join(home, ".agents", "skills", "example")
@@ -752,9 +759,10 @@ func TestSkillMutationsRollbackOnInstructionAndReceiptFailures(t *testing.T) {
 					if _, err := Apply("all", "test"); err != nil {
 						t.Fatal(err)
 					}
-					if action == "replace" {
-						projection.Source = "skills/example-v2"
-						writeCatalogWithInstructions(t, repo, []Projection{projection}, []Instruction{instruction})
+					if action == "update" {
+						if err := os.WriteFile(filepath.Join(repo, "skills", "example", "SKILL.md"), []byte("---\nname: example\ndescription: v2\n---\n"), 0o644); err != nil {
+							t.Fatal(err)
+						}
 					} else {
 						writeCatalogWithInstructions(t, repo, nil, []Instruction{instruction})
 					}
@@ -762,8 +770,11 @@ func TestSkillMutationsRollbackOnInstructionAndReceiptFailures(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if plan, _ := Plan("all"); actionByID(plan, "skill/agents/example").Action != action {
+					t.Fatalf("plan: %#v", plan)
+				}
 				beforeReceipt, receiptErr := os.ReadFile(paths.Receipt)
-				beforeLink, linkErr := os.Readlink(destination)
+				beforeHash, hashErr := skillTreeHash(destination)
 				failure.inject()
 				t.Cleanup(func() {
 					beforeInstructionMutation = nil
@@ -776,9 +787,10 @@ func TestSkillMutationsRollbackOnInstructionAndReceiptFailures(t *testing.T) {
 					if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
 						t.Fatalf("created skill remained: %v", err)
 					}
-				} else if afterLink, err := os.Readlink(destination); err != nil || afterLink != beforeLink || linkErr != nil {
-					t.Fatalf("skill did not return to prior link: before=%q after=%q err=%v", beforeLink, afterLink, err)
+				} else if afterHash, err := skillTreeHash(destination); err != nil || afterHash != beforeHash || hashErr != nil {
+					t.Fatalf("skill did not return to its prior copy: %v %v", err, hashErr)
 				}
+				assertNoSkillTemporaries(t, home)
 				afterReceipt, afterErr := os.ReadFile(paths.Receipt)
 				if receiptErr == nil {
 					if afterErr != nil || string(afterReceipt) != string(beforeReceipt) {

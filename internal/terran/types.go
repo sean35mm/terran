@@ -109,6 +109,9 @@ type ReceiptManaged struct {
 	TerranBuildVersion string    `json:"terran_build_version"`
 }
 
+// ReceiptProjection records one owned skill. Strategy "copy" is a managed
+// directory copy whose AppliedHash is the readSkillTree hash Terran wrote;
+// "symlink" is a legacy live link, converted to a copy by the next apply.
 type ReceiptProjection struct {
 	Catalog            string    `json:"catalog"`
 	Skill              string    `json:"skill"`
@@ -116,6 +119,8 @@ type ReceiptProjection struct {
 	Source             string    `json:"source"`
 	Destination        string    `json:"destination"`
 	Strategy           string    `json:"strategy"`
+	AppliedHash        string    `json:"applied_hash,omitempty"`
+	Origin             string    `json:"origin,omitempty"` // copy only: "created" or "adopted"
 	AppliedAt          time.Time `json:"applied_at"`
 	TerranBuildVersion string    `json:"terran_build_version"`
 }

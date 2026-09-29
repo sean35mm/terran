@@ -52,7 +52,7 @@ using.
    and the catalog version. Never choose for them.
 5. Never push to git. Commit in a catalog only when the user asks, and tell the
    user to push.
-6. Never edit a Terran-managed destination directly (skill links, instruction
+6. Never edit a Terran-managed destination directly (skill copies, instruction
    files, managed configs, owned settings keys). Change the catalog source and
    apply.
 7. Never read, print, copy, or store secrets. Terran never prints file values;
@@ -292,11 +292,11 @@ reports the matching status.
 | `noop` | `ok` | Already up to date. |
 | `create` | `missing` | The item does not exist yet; Terran will create it. |
 | `adopt` | `pending` | An identical item already exists; Terran takes ownership without changing it (files keep a private backup). |
-| `update` | `pending` | The catalog changed; Terran will copy the new version. |
-| `replace` | `pending` | A skill link's source changed, or a collision was resolved with `replace`. Originals are backed up privately. |
+| `update` | `pending` | The catalog changed; Terran will copy the new version. For a skill this is also the one-time `convert live symlink to managed copy`. |
+| `replace` | `pending` | A collision was resolved with `replace`. Originals are backed up privately. |
 | `remove` | `orphaned` | The item left the catalog; Terran will delete what it created. |
 | `restore` | `orphaned` | The item left the catalog; Terran will put back the original it had adopted. |
-| `release` | `orphaned` | An adopted settings key left the catalog; Terran stops owning it and keeps its value. |
+| `release` | `orphaned` | An adopted settings key or skill left the catalog; Terran stops owning it and keeps its value or directory. |
 | `held` | `held` | Pinned on this machine (or kept by a `keep` decision); Terran does not look at it. Inert: it does not make status non-clean. |
 | `excluded` | `excluded` | The catalog item is for another platform (the reason reads like `darwin-only`). Expected and harmless. |
 | `blocked_collision` | `collision` | Something exists at the destination that Terran does not own and it differs. Ask the user; exit `3`. |
@@ -382,7 +382,7 @@ owns.
 
 | Kind | Source | Destination | How it is kept |
 | --- | --- | --- | --- |
-| Skill | `skills/<name>` | `~/.agents/skills/<name>`, `~/.claude/skills/<name>` | live symlink |
+| Skill | `skills/<name>` | `~/.agents/skills/<name>`, `~/.claude/skills/<name>` | managed directory copy |
 | Instruction | any file | `claude-global`: `~/.claude/CLAUDE.md`; `opencode-global`: `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/AGENTS.md`; `codex-global`: `${CODEX_HOME:-$HOME/.codex}/AGENTS.md` | whole-file copy |
 | Config | any file | `opencode-config`, `naru-runtime`: `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/{opencode,naru-runtime}.json`; `mise-config`, `mise-lock`: `${XDG_CONFIG_HOME:-$HOME/.config}/mise/{config.toml,mise.lock}` | whole-file copy |
 | File | any file | `claude-agent`: `~/.claude/agents/<name>.md`; `claude-command`: `~/.claude/commands/<name>.md`; `claude-hook`: `~/.claude/hooks/<name>` (mode 0755); `opencode-plugin`: `.../opencode/plugins/<name>.js\|.ts`; `opencode-tool`: `.../opencode/tool/<name>.ts`; `opencode-command`: `.../opencode/command/<name>.md` | whole-file copy of one named file |
@@ -394,6 +394,26 @@ files are harness-specific policies and deliberately differ from each other and
 from the repository-local [`AGENTS.md`](AGENTS.md). Copies change only through
 `terran apply`. New config and settings files are private where the target
 demands it (OpenCode and Naru configs are mode 0600).
+
+Skills are copies too. Terran writes each skill directory with normalized modes
+(0755 directories and executables, 0644 other files) and records its tree hash:
+sha256 over one `<type>\0<path>\0<mode>\0<content sha256>` line per entry. A
+live symlink would let a `git checkout` or an edit in the catalog change what
+every harness loads without a plan anyone reviewed; a copy changes only when you
+edit the skill in the catalog, run `terran plan`, and approve `terran apply`.
+Terran builds the new copy in a hidden `.terran-tmp-<skill>-*` directory beside
+the destination, verifies it, swaps it in, and keeps the old one as
+`.terran-old-<skill>-*` until the receipt commits, so a failed apply leaves
+every skill as it was. A copy that was edited, lost a file, or changed an
+executable bit is `blocked_drift`. An existing directory identical to the
+source is adopted, and released (kept) if the skill later leaves the catalog.
+Skill sources may contain only regular files and directories: at most 2000
+entries and 32 MiB per skill.
+
+Machines applied with Terran 0.3 hold live symlinks. Their first 0.4 plan shows
+each as `update` with the reason `convert live symlink to managed copy`, and
+that apply replaces every exact receipt-owned link with an identical copy. A
+legacy link that no longer points at its source is `blocked_drift`.
 
 Terran does not manage secrets, packages beyond declaring required tools,
 shell profiles, MCP server processes, remote clone/fetch, services, a daemon, or
@@ -543,7 +563,9 @@ compatible with catalog `0.4.0`.
 
 Without a receipt, a missing item is created (`create`). An existing safe item
 whose content exactly matches the source is adopted (`adopt`): the active file is
-left untouched and a validated private backup is stored.
+left untouched and a validated private backup is stored. A skill is adopted only
+when an existing real directory has the source's tree hash; an existing symlink,
+even one pointing at the catalog, is a collision.
 
 A differing existing item that Terran does not own is a `blocked_collision`.
 `plan` and a bare `apply` never resolve it; both report it and `apply` exits
@@ -560,8 +582,8 @@ For instructions, configs, and files, only safe items can be replaced: regular,
 non-symlink, single-link, effective-user-owned files in safe parents. Symlinks,
 hard links, directories, devices, and unsafe files or parents remain blocked.
 For a skill, an existing directory or symlink is renamed into Terran's private
-backups (same filesystem only) and is not restored on removal; any other file
-type remains blocked. A destination whose path contains a symlink below `HOME`,
+backups (same filesystem only) and replaced by a managed copy; it is not restored
+on removal. Any other file type remains blocked. A destination whose path contains a symlink below `HOME`,
 `XDG_CONFIG_HOME`, or `CODEX_HOME` is blocked with `destination path contains a
 symlink` and cannot be replaced. All decisions and state are revalidated before
 the first change.
@@ -617,8 +639,8 @@ Terran has no self-updater and never fetches a catalog. Update separately:
 2. The catalogs: review changes (`terran.json`, every changed `SKILL.md`,
    instruction and config sources, provenance, licenses) before checking out.
 
-Skills are live symlinks, so a checkout changes them immediately. Everything else
-changes only through `terran apply`. After either update: `terran version`,
+A checkout changes nothing on the machine: skills, instructions, configs, files,
+and settings keys all change only through `terran apply`. After either update: `terran version`,
 `terran plan --json`, show the user, `terran apply --expect <digest>`,
 `terran status --local`, `terran doctor`. Across a fleet, update every binary to
 0.4 or newer first (`terran status` shows each `TERRAN` version), then the
@@ -629,8 +651,9 @@ catalogs. See `terran-update`.
 Preserve the receipt until removal and restoration finish. In a reviewed catalog
 branch, remove the desired manifest entries, run `terran plan --json`, and verify
 every action: created items are removed, adopted files and settings keys are
-restored from validated backups (`remove`, `restore`, `release`), and skill links
-are removed only while they remain exact receipt-owned links. Then apply, and run
+restored from validated backups (`remove`, `restore`, `release`), created skill
+copies are removed and adopted ones released only while they still match their
+applied tree hash. Then apply, and run
 `terran status --local` and `terran doctor`.
 
 For full decommission, temporarily use a manifest with empty item lists and the

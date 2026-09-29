@@ -9,6 +9,7 @@ Breaking:
 - Remove the interactive guided workflow (bare `terran` wizard) and every terminal prompt. Terran is now agent-only: it never prompts, detects terminals, or reads stdin. Collision decisions are flags: `terran apply --decide ITEM_ID=replace|keep`.
 - Manifest, enrollment, and receipt schema version 2. Schema 1 files are still read and upgraded in memory, then saved as schema 2. JSON output reports `schema_version: 2`. The default catalog's `terran.json` is itself schema version 2, so Terran 0.3 binaries cannot read it at all: upgrade the binary on every machine to 0.4 before pulling this catalog.
 - Remove the `terran-enroll` skill; `terran-provision` replaces it.
+- Skills are managed directory copies instead of live symlinks, so skill content changes only through a reviewed `terran plan` and `terran apply`. The first 0.4 apply converts every exact receipt-owned 0.3 symlink to an identical copy (planned as `update`, `convert live symlink to managed copy`). Skill receipts record the applied tree hash; an edited, missing, or re-moded copy is `blocked_drift`. Skill sources may contain only regular files and directories, at most 2000 entries and 32 MiB per skill. An existing symlink at a skill destination is no longer adopted; an identical real directory is, and is released (kept) when the skill leaves the catalog.
 
 Added:
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -632,6 +633,109 @@ func TestTrustedStateFilesRejectForeignOwnerWhenPortable(t *testing.T) {
 	}
 }
 
+// skillCopied reports whether destination is a real directory whose tree
+// hash equals source's.
+func skillCopied(destination, source string) bool {
+	want, wantErr := skillTreeHash(source)
+	got, gotErr := skillTreeHash(destination)
+	return wantErr == nil && gotErr == nil && got == want
+}
+
+func TestSkillTreeHashIsStableAndSensitive(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "skill")
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, content string, mode os.FileMode) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("SKILL.md", "---\nname: skill\n---\n", 0o644)
+	write("scripts/run.sh", "echo hi\n", 0o644)
+	hash := func() string {
+		t.Helper()
+		got, err := skillTreeHash(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	base := hash()
+	if hash() != base {
+		t.Fatal("tree hash is not stable")
+	}
+	write("scripts/run.sh", "echo hi\n", 0o600)
+	if hash() != base {
+		t.Fatal("non-exec mode change altered the normalized tree hash")
+	}
+	seen := map[string]string{"base": base}
+	for _, change := range []struct {
+		name   string
+		mutate func()
+	}{
+		{"content", func() { write("scripts/run.sh", "echo bye\n", 0o644) }},
+		{"exec bit", func() { write("scripts/run.sh", "echo bye\n", 0o755) }},
+		{"added file", func() { write("notes.md", "", 0o644) }},
+		{"added directory", func() { _ = os.Mkdir(filepath.Join(dir, "empty"), 0o755) }},
+		{"removed file", func() { _ = os.Remove(filepath.Join(dir, "notes.md")) }},
+	} {
+		change.mutate()
+		got := hash()
+		for name, prior := range seen {
+			if got == prior {
+				t.Fatalf("%s: tree hash equals the %s hash", change.name, name)
+			}
+		}
+		seen[change.name] = got
+	}
+	for name, add := range map[string]func(string) error{
+		"symlink": func(path string) error { return os.Symlink("SKILL.md", path) },
+		"fifo":    func(path string) error { return syscall.Mkfifo(path, 0o644) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, repo := testEnvironment(t)
+			path := filepath.Join(repo, "skills", "example", "scripts", "entry")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := add(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadManifest(repo); !hasCode(err, CodeManifestInvalid) || !strings.Contains(err.Error(), "regular file or directory") {
+				t.Fatalf("%s inside a skill source accepted: %v", name, err)
+			}
+		})
+	}
+	t.Run("limits", func(t *testing.T) {
+		_, repo := testEnvironment(t)
+		source := filepath.Join(repo, "skills", "example")
+		big := filepath.Join(source, "big.bin")
+		if err := os.WriteFile(big, make([]byte, skillByteLimit), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadManifest(repo); !hasCode(err, CodeManifestInvalid) || !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("oversized skill accepted: %v", err)
+		}
+		if err := os.Remove(big); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < skillEntryLimit; i++ {
+			if err := os.WriteFile(filepath.Join(source, fmt.Sprintf("f%04d", i)), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := LoadManifest(repo); !hasCode(err, CodeManifestInvalid) || !strings.Contains(err.Error(), "entries") {
+			t.Fatalf("skill with too many entries accepted: %v", err)
+		}
+	})
+}
+
 func TestCreateAdoptNoopCollisionDriftAndRemoval(t *testing.T) {
 	home, repo := testEnvironment(t)
 	_, _, _ = Enroll(repo, "test", "", false)
@@ -639,14 +743,28 @@ func TestCreateAdoptNoopCollisionDriftAndRemoval(t *testing.T) {
 	if err != nil || actionCount(plan, "create") != 2 {
 		t.Fatalf("create plan: %#v %v", plan, err)
 	}
-	agentRoot := filepath.Join(home, ".agents", "skills")
-	_ = os.MkdirAll(agentRoot, 0o755)
-	source := filepath.Join(repo, "skills", "example")
-	canonicalSource, _ := filepath.EvalSymlinks(source)
-	relativeSource, _ := filepath.Rel(agentRoot, canonicalSource)
-	_ = os.Symlink(relativeSource, filepath.Join(agentRoot, "example"))
+	source, _ := filepath.EvalSymlinks(filepath.Join(repo, "skills", "example"))
+	agentCopy := filepath.Join(home, ".agents", "skills", "example")
+	claudeCopy := filepath.Join(home, ".claude", "skills", "example")
+	skillData, _ := os.ReadFile(filepath.Join(source, "SKILL.md"))
+	if err := os.MkdirAll(agentCopy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentCopy, "extra.md"), []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentCopy, "SKILL.md"), skillData, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	plan, _ = Plan("all")
-	if actionCount(plan, "adopt") != 1 || actionCount(plan, "create") != 1 {
+	if actionByID(plan, "skill/agents/example").Action != "blocked_collision" {
+		t.Fatalf("different unowned directory was not a collision: %#v", plan)
+	}
+	if err := os.Remove(filepath.Join(agentCopy, "extra.md")); err != nil {
+		t.Fatal(err)
+	}
+	plan, _ = Plan("all")
+	if actionByID(plan, "skill/agents/example").Action != "adopt" || actionByID(plan, "skill/claude/example").Action != "create" {
 		t.Fatalf("adopt plan: %#v", plan)
 	}
 	applied, err := Apply("all", "test")
@@ -654,33 +772,217 @@ func TestCreateAdoptNoopCollisionDriftAndRemoval(t *testing.T) {
 		t.Fatalf("apply: %v %#v", err, applied)
 	}
 	plan, _ = Plan("all")
-	if !plan.Clean || actionCount(plan, "noop") != 2 || !exactSymlink(filepath.Join(agentRoot, "example"), canonicalSource) {
+	if !plan.Clean || actionCount(plan, "noop") != 2 || !skillCopied(agentCopy, source) || !skillCopied(claudeCopy, source) {
 		t.Fatalf("noop plan: %#v", plan)
 	}
-	_ = os.Remove(filepath.Join(agentRoot, "example"))
-	_ = os.WriteFile(filepath.Join(agentRoot, "example"), []byte("collision"), 0o600)
-	plan, _ = Plan("all")
-	if actionCount(plan, "blocked_drift") != 1 {
-		t.Fatalf("drift not detected: %#v", plan)
+	if info, err := os.Lstat(claudeCopy); err != nil || !info.IsDir() || info.Mode().Perm() != 0o755 || fileMode(t, filepath.Join(claudeCopy, "SKILL.md")) != 0o644 {
+		t.Fatalf("created copy is not a 0755 directory of 0644 files: %v", err)
 	}
-	before := filepath.Join(home, ".claude", "skills", "example")
-	_, _ = Apply("all", "test")
-	if !exactSymlink(before, canonicalSource) {
-		t.Fatal("blocked apply mutated another projection")
+	paths, _ := ResolvePaths()
+	receipt, _ := LoadReceipt(paths, Enrollment{})
+	for _, projection := range receipt.Projections {
+		want := map[string]string{"agents": "adopted", "claude": "created"}[projection.Target]
+		if projection.Strategy != "copy" || projection.Origin != want || !validHash(projection.AppliedHash) {
+			t.Fatalf("receipt projection: %#v", projection)
+		}
 	}
-	_ = os.Remove(filepath.Join(agentRoot, "example"))
-	_ = os.Symlink(canonicalSource, filepath.Join(agentRoot, "example"))
-	writeCatalog(t, repo, nil)
-	_ = os.RemoveAll(source)
-	plan, err = Plan("agents")
-	if err != nil || actionCount(plan, "remove") != 1 {
-		t.Fatalf("removal plan: %#v %v", plan, err)
+
+	for name, mutate := range map[string]func() error{
+		"edited":  func() error { return os.WriteFile(filepath.Join(agentCopy, "SKILL.md"), []byte("edited"), 0o644) },
+		"deleted": func() error { return os.Remove(filepath.Join(agentCopy, "SKILL.md")) },
+		"exec":    func() error { return os.Chmod(filepath.Join(agentCopy, "SKILL.md"), 0o755) },
+	} {
+		if err := mutate(); err != nil {
+			t.Fatal(err)
+		}
+		plan, _ = Plan("all")
+		if actionByID(plan, "skill/agents/example").Action != "blocked_drift" {
+			t.Fatalf("%s copy was not drift: %#v", name, plan)
+		}
+		_, _ = Apply("all", "test")
+		if !skillCopied(claudeCopy, source) {
+			t.Fatalf("%s: blocked apply mutated another projection", name)
+		}
+		_ = os.Remove(filepath.Join(agentCopy, "SKILL.md"))
+		if err := os.WriteFile(filepath.Join(agentCopy, "SKILL.md"), skillData, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := Apply("agents", "test"); err != nil {
+
+	changed := []byte("---\nname: example\ndescription: changed\n---\n")
+	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), changed, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(filepath.Join(agentRoot, "example")); !os.IsNotExist(err) {
+	for _, copied := range []string{agentCopy, claudeCopy} {
+		if got, _ := os.ReadFile(filepath.Join(copied, "SKILL.md")); !bytes.Equal(got, skillData) {
+			t.Fatal("a source edit reached a copy before apply")
+		}
+	}
+	plan, _ = Plan("all")
+	if actionCount(plan, "update") != 2 || actionByID(plan, "skill/agents/example").Reason != "skill source changed" {
+		t.Fatalf("update plan: %#v", plan)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(agentCopy, "SKILL.md")); !bytes.Equal(got, changed) || !mustPlan(t, "all").Clean {
+		t.Fatalf("update not applied: %q", got)
+	}
+
+	writeCatalog(t, repo, nil)
+	_ = os.RemoveAll(source)
+	plan, err = Plan("all")
+	if err != nil || actionByID(plan, "skill/agents/example").Action != "release" || actionByID(plan, "skill/claude/example").Action != "remove" {
+		t.Fatalf("removal plan: %#v %v", plan, err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(agentCopy, "SKILL.md")); err != nil || !bytes.Equal(got, changed) {
+		t.Fatalf("released copy was not kept: %v", err)
+	}
+	if _, err := os.Lstat(claudeCopy); !os.IsNotExist(err) {
 		t.Fatal("removed projection remains")
+	}
+	if receipt, _ := LoadReceipt(paths, Enrollment{}); len(receipt.Projections) != 0 {
+		t.Fatalf("receipt kept removed skills: %#v", receipt.Projections)
+	}
+	assertNoSkillTemporaries(t, home)
+}
+
+// assertNoSkillTemporaries fails when an apply left a temporary or set-aside
+// skill directory in a skill root.
+func assertNoSkillTemporaries(t *testing.T, home string) {
+	t.Helper()
+	for _, root := range []string{filepath.Join(home, ".agents", "skills"), filepath.Join(home, ".claude", "skills")} {
+		entries, _ := os.ReadDir(root)
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".terran-") {
+				t.Fatalf("apply left %s in %s", entry.Name(), root)
+			}
+		}
+	}
+}
+
+// writeLegacySkillState replaces the receipt's skill projections with v0.3
+// live symlinks to their sources.
+func writeLegacySkillState(t *testing.T) Receipt {
+	t.Helper()
+	paths, _ := ResolvePaths()
+	receipt, err := LoadReceipt(paths, Enrollment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, projection := range receipt.Projections {
+		if err := os.RemoveAll(projection.Destination); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(projection.Source, projection.Destination); err != nil {
+			t.Fatal(err)
+		}
+		receipt.Projections[i].Strategy, receipt.Projections[i].AppliedHash, receipt.Projections[i].Origin = "symlink", "", ""
+	}
+	if err := atomicJSON(paths.Receipt, receipt); err != nil {
+		t.Fatal(err)
+	}
+	return receipt
+}
+
+func TestLegacySymlinkProjectionsConvertToCopies(t *testing.T) {
+	home, repo := testEnvironment(t)
+	_, _, _ = Enroll(repo, "test", "", false)
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	legacy := writeLegacySkillState(t)
+	plan := mustPlan(t, "all")
+	for _, action := range plan.Actions {
+		if action.Action != "update" || action.Reason != "convert live symlink to managed copy" {
+			t.Fatalf("legacy plan: %#v", action)
+		}
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := ResolvePaths()
+	receipt, _ := LoadReceipt(paths, Enrollment{})
+	for _, projection := range receipt.Projections {
+		info, err := os.Lstat(projection.Destination)
+		if err != nil || !info.IsDir() || !skillCopied(projection.Destination, projection.Source) || projection.Strategy != "copy" || projection.Origin != "created" {
+			t.Fatalf("converted projection: %#v %v", projection, err)
+		}
+	}
+	if !mustPlan(t, "all").Clean {
+		t.Fatal("plan after conversion is not clean")
+	}
+	assertNoSkillTemporaries(t, home)
+
+	// A legacy link that no longer points at its source is drift.
+	if err := atomicJSON(paths.Receipt, legacy); err != nil {
+		t.Fatal(err)
+	}
+	for _, projection := range legacy.Projections {
+		_ = os.RemoveAll(projection.Destination)
+		if err := os.Symlink(filepath.Join(home, "elsewhere"), projection.Destination); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if plan := mustPlan(t, "all"); actionCount(plan, "blocked_drift") != 2 {
+		t.Fatalf("changed legacy link was not drift: %#v", plan)
+	}
+}
+
+func TestSkillUpdateRollbackRestoresPriorDestinations(t *testing.T) {
+	for _, prior := range []string{"copy", "symlink"} {
+		t.Run(prior, func(t *testing.T) {
+			home, repo := testEnvironment(t)
+			_, _, _ = Enroll(repo, "test", "", false)
+			if _, err := Apply("all", "test"); err != nil {
+				t.Fatal(err)
+			}
+			paths, _ := ResolvePaths()
+			if prior == "symlink" {
+				writeLegacySkillState(t)
+			} else if err := os.WriteFile(filepath.Join(repo, "skills", "example", "SKILL.md"), []byte("---\nname: example\ndescription: v2\n---\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			receiptBefore, _ := os.ReadFile(paths.Receipt)
+			snapshot := func() map[string]string {
+				state := map[string]string{}
+				for _, target := range []string{"agents", "claude"} {
+					destination, _ := skillDestination(paths, target, "example")
+					if link, err := os.Readlink(destination); err == nil {
+						state[target] = "link " + link
+					} else {
+						state[target], _ = skillTreeHash(destination)
+					}
+				}
+				return state
+			}
+			before := snapshot()
+			if plan := mustPlan(t, "all"); actionCount(plan, "update") != 2 {
+				t.Fatalf("update plan: %#v", plan)
+			}
+			installs := 0
+			afterSkillInstall = func(Action) error {
+				installs++
+				if installs == 2 {
+					return errors.New("forced second skill failure")
+				}
+				return nil
+			}
+			t.Cleanup(func() { afterSkillInstall = nil })
+			if _, err := Apply("all", "test"); err == nil || !strings.Contains(err.Error(), "forced") {
+				t.Fatalf("forced failure missing: %v", err)
+			}
+			if after := snapshot(); !reflect.DeepEqual(after, before) {
+				t.Fatalf("rollback changed destinations: before=%v after=%v", before, after)
+			}
+			if receiptAfter, _ := os.ReadFile(paths.Receipt); !bytes.Equal(receiptAfter, receiptBefore) {
+				t.Fatal("rollback changed the receipt")
+			}
+			assertNoSkillTemporaries(t, home)
+		})
 	}
 }
 
@@ -1128,8 +1430,8 @@ func TestOverlayItemsCarryCatalogAndAreRemovedFromOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(home, ".agents", "skills", "secret")
-	if target, err := os.Readlink(link); err != nil || target != filepath.Join(overlay, "skills", "secret") {
-		t.Fatalf("overlay link: %q %v", target, err)
+	if !skillCopied(link, filepath.Join(overlay, "skills", "secret")) {
+		t.Fatal("overlay skill was not copied")
 	}
 	paths, _ := ResolvePaths()
 	receipt, err := LoadReceipt(paths, enrollment)
@@ -1185,7 +1487,7 @@ func TestUnavailableOverlayNeverPlansRemoval(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		target, err := os.Readlink(link)
+		target, err := skillTreeHash(link)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -146,6 +146,21 @@ func Doctor(buildVersion string) DoctorResult {
 		add("instruction_receipt", "fail", err.Error())
 		add("config_receipt", "fail", err.Error())
 	} else {
+		// Skill copies are checked by tree hash; contents are read only to hash them.
+		for _, projection := range receipt.Projections {
+			if held[ItemID("skill", projection.Target, projection.Skill)] {
+				continue
+			}
+			name := "skill_" + projection.Target + "/" + projection.Skill
+			switch {
+			case !ownedSkillIntact(projection.Destination, projection):
+				add(name, "fail", "managed skill "+projection.Destination+" is missing or changed")
+			case projection.Strategy == "symlink":
+				add(name, "warn", projection.Destination+" is a legacy live symlink; terran apply converts it to a managed copy")
+			default:
+				add(name, "ok", projection.Destination+" matches its applied tree hash")
+			}
+		}
 		fileHealthy, files := true, false
 		for _, managed := range receipt.Managed {
 			if managed.Kind == "file" {

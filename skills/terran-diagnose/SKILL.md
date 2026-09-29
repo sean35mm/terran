@@ -26,17 +26,18 @@ Add `--target agents|claude|opencode|codex|mise|t3` to narrow. `doctor` also rep
 | `noop` | up to date | nothing to do |
 | `create` | missing, will be created | safe pending work |
 | `adopt` | identical item already exists | Terran takes ownership, active file untouched |
-| `update` / `replace` | catalog changed | safe pending work; `replace` swaps a changed skill link |
+| `update` | catalog changed | safe pending work; the reason `convert live symlink to managed copy` is the one-time upgrade of a 0.3 skill link |
+| `replace` | a collision decided `replace` | the original is backed up privately |
 | `remove` / `restore` | no longer in the catalog | created items are deleted; adopted originals are restored |
-| `release` | adopted settings key left the catalog | ownership dropped, the value stays |
+| `release` | adopted settings key or skill left the catalog | ownership dropped, the value or directory stays |
 | `held` | pinned on this machine | never inspected or changed; `terran unhold <id>` to release |
 | `excluded` | catalog item for another platform (reason is like `darwin-only`) | expected; not an error |
 | `blocked_collision` | something differs and Terran does not own it | ask the user: replace or keep, after showing both versions |
-| `blocked_drift` | Terran-owned content changed or vanished | stop; ask what outcome they want |
+| `blocked_drift` | Terran-owned content changed or vanished (for a skill copy: an edited, missing, or re-moded file) | stop; ask what outcome they want |
 
 Statuses: `ok`, `missing`, `pending`, `orphaned`, `collision`, `drift`, `held`, `excluded`. Only `held` and `excluded` do not make status non-clean.
 
-Resolving a collision: `terran apply --expect <digest> --decide <id>=replace|keep` (repeatable). `replace` backs up the original privately and installs the catalog version (a skill directory or symlink is moved into Terran's private backups and not restored on removal); `keep` holds the item. Only with the user's choice. A replace Terran cannot do stays `blocked_collision` with a reason starting `replace not possible:`.
+Resolving a collision: `terran apply --expect <digest> --decide <id>=replace|keep` (repeatable). `replace` backs up the original privately and installs the catalog version (a skill directory or symlink is moved into Terran's private backups, replaced by a managed copy, and not restored on removal); `keep` holds the item. Only with the user's choice. A replace Terran cannot do stays `blocked_collision` with a reason starting `replace not possible:`.
 
 Two reasons need the user rather than a decision: `destination path contains a symlink` (a directory below `HOME`, `XDG_CONFIG_HOME`, or `CODEX_HOME` on the way to the destination is a symlink) and `CODEX_HOME changed` (drift on `codex-global` after `CODEX_HOME` moved).
 

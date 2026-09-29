@@ -24,6 +24,7 @@ type LoadedManifest struct {
 	Repository         string
 	Fingerprint        string
 	Sources            map[string]string
+	SkillHashes        map[string]string // skill -> readSkillTree hash of its source
 	InstructionSources map[string]string
 	InstructionHashes  map[string]string
 	ConfigSources      map[string]string
@@ -74,6 +75,7 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 		return LoadedManifest{}, fmt.Errorf("manifest version is required")
 	}
 	sources := make(map[string]string)
+	skillHashes := make(map[string]string)
 	instructionSources := make(map[string]string)
 	instructionHashes := make(map[string]string)
 	configSources := make(map[string]string)
@@ -135,6 +137,13 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 		sort.Strings(p.Targets)
 		if prior, ok := sources[p.Skill]; ok && prior != canonicalSource {
 			return LoadedManifest{}, fmt.Errorf("skill %s has multiple sources", p.Skill)
+		}
+		if _, ok := skillHashes[p.Skill]; !ok {
+			_, hash, err := readSkillTree(canonicalSource)
+			if err != nil {
+				return LoadedManifest{}, fmt.Errorf("source for %s: %w", p.Skill, err)
+			}
+			skillHashes[p.Skill] = hash
 		}
 		sources[p.Skill] = canonicalSource
 	}
@@ -322,7 +331,7 @@ func LoadManifest(repo string) (loaded LoadedManifest, err error) {
 	sort.Slice(manifest.Tools, func(i, j int) bool { return manifest.Tools[i].Name < manifest.Tools[j].Name })
 	normalized, _ := json.Marshal(manifest)
 	sum := sha256.Sum256(normalized)
-	return LoadedManifest{manifest, canonicalRepo, hex.EncodeToString(sum[:]), sources, instructionSources, instructionHashes, configSources, configHashes, fileSources, fileHashes, jsonKeySources, jsonKeyHashes, jsonKeyValues}, nil
+	return LoadedManifest{manifest, canonicalRepo, hex.EncodeToString(sum[:]), sources, skillHashes, instructionSources, instructionHashes, configSources, configHashes, fileSources, fileHashes, jsonKeySources, jsonKeyHashes, jsonKeyValues}, nil
 }
 
 func validatePlatforms(platforms []string) error {
@@ -504,4 +513,97 @@ func frontmatterName(path string) (string, error) {
 		return "", err
 	}
 	return "", fmt.Errorf("unterminated frontmatter")
+}
+
+const (
+	skillEntryLimit = 2000
+	skillByteLimit  = 32 << 20
+)
+
+// skillEntry is one file or directory below a skill root. Modes are
+// normalized: 0755 for directories and executable files, otherwise 0644.
+type skillEntry struct {
+	path string // slash-separated, relative to the skill root
+	dir  bool
+	mode os.FileMode
+	data []byte
+}
+
+// readSkillTree reads a skill directory without following symlinks. It
+// returns the entries sorted by path and the tree hash: sha256 over one
+// "<type>\x00<path>\x00<mode>\x00<content sha256>\n" line per entry, where
+// type is "dir" or "file" and directories have an empty content hash. Only
+// trusted real directories and regular files are allowed, within
+// skillEntryLimit entries and skillByteLimit bytes.
+func readSkillTree(root string) ([]skillEntry, string, error) {
+	if err := validateTrustedDirectory(root, "skill directory"); err != nil {
+		return nil, "", err
+	}
+	var entries []skillEntry
+	var total int64
+	var walk func(dir, relative string) error
+	walk = func(dir, relative string) error {
+		children, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			if len(entries) >= skillEntryLimit {
+				return fmt.Errorf("skill %s has more than %d entries", root, skillEntryLimit)
+			}
+			path := filepath.Join(dir, child.Name())
+			entry := skillEntry{path: child.Name()}
+			if relative != "" {
+				entry.path = relative + "/" + child.Name()
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			switch {
+			case info.IsDir():
+				if err := validateTrustedDirectory(path, "skill directory"); err != nil {
+					return err
+				}
+				entry.dir, entry.mode = true, 0o755
+				entries = append(entries, entry)
+				if err := walk(path, entry.path); err != nil {
+					return err
+				}
+			case info.Mode().IsRegular():
+				data, mode, err := readTrustedFile(path, "skill file", skillByteLimit-total, 0)
+				if err != nil {
+					return err
+				}
+				total += int64(len(data))
+				entry.mode, entry.data = 0o644, data
+				if mode&0o111 != 0 {
+					entry.mode = 0o755
+				}
+				entries = append(entries, entry)
+			default:
+				return fmt.Errorf("skill entry %s must be a regular file or directory", path)
+			}
+		}
+		return nil
+	}
+	if err := walk(root, ""); err != nil {
+		return nil, "", err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
+	h := sha256.New()
+	for _, entry := range entries {
+		kind, sum := "dir", ""
+		if !entry.dir {
+			kind, sum = "file", hashBytes(entry.data)
+		}
+		fmt.Fprintf(h, "%s\x00%s\x00%04o\x00%s\n", kind, entry.path, entry.mode, sum)
+	}
+	return entries, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// skillTreeHash is the readSkillTree hash of a directory.
+func skillTreeHash(root string) (string, error) {
+	_, hash, err := readSkillTree(root)
+	return hash, err
 }

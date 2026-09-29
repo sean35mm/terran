@@ -55,7 +55,7 @@ Follow the Agent guide in the Terran README:
 
 Machine-local items that a catalog item must not touch: `terran hold <id>`; undo with `terran unhold <id>`.
 
-Removing an item: delete its manifest entry and source, then plan. Expect `remove` for created items, `restore` for adopted ones, and `release` for adopted settings keys (ownership dropped, value kept). Skills are live symlinks into the catalog checkout; instructions, configs, files, and settings keys change only through apply. Commit in the catalog only when the user asks; then tell them to push.
+Removing an item: delete its manifest entry and source, then plan. Expect `remove` for created items, `restore` for adopted ones, and `release` for adopted settings keys and skills (ownership dropped, value or directory kept). Skills are managed directory copies, not links into the checkout: editing a skill in the catalog changes nothing until you plan (`update`, `skill source changed`) and apply, like instructions, configs, files, and settings keys. Skill sources may hold only regular files and directories (no symlinks), at most 2000 entries and 32 MiB. Commit in the catalog only when the user asks; then tell them to push.
 
 ## Should trigger
 

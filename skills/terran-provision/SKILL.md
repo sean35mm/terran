@@ -13,7 +13,7 @@ Command Center names are a convention the user chooses (for example `cc1`, `cc2`
 
 - Every install command needs the user's approval before you run it. Show the exact command first.
 - Never push to git. Commit in the overlay only when the user asks, then tell them to push.
-- Never edit Terran-managed destinations (`~/.claude/CLAUDE.md`, `~/.claude/settings.json` keys Terran owns, skill links, `mise` config) directly. Change the catalog and apply.
+- Never edit Terran-managed destinations (`~/.claude/CLAUDE.md`, `~/.claude/settings.json` keys Terran owns, skill copies, `mise` config) directly. Change the catalog and apply.
 - Never read, print, or store secrets, tokens, or private keys. The user performs every login.
 - Always `terran plan --json`, show the user the plan, get explicit approval, then `terran apply --expect <digest>`. Use `--decide <id>=replace|keep` only for a `blocked_collision` after the user has seen both versions and chosen.
 - Explain every `excluded` item to the user (it does not apply to this platform) and every `held` item (pinned on this machine).
