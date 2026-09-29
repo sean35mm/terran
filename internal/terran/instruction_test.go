@@ -1153,6 +1153,72 @@ func TestCodexHomeAndMiseDestinations(t *testing.T) {
 	}
 }
 
+func TestDuplicateDestinationsAndChangedCodexHome(t *testing.T) {
+	instructions := []Instruction{{Target: "claude-global", Source: "instructions/CLAUDE.md"}, {Target: "codex-global", Source: "instructions/codex.md"}, {Target: "opencode-global", Source: "instructions/opencode.md"}}
+	t.Run("duplicate destination", func(t *testing.T) {
+		home, repo := fileEnvironment(t)
+		t.Setenv("CODEX_HOME", filepath.Join(home, "config", "opencode"))
+		writeCatalogWithFiles(t, repo, "test-catalog", instructions, nil)
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Plan("all"); !hasCode(err, CodeManifestInvalid) || !strings.Contains(err.Error(), "both resolve to") {
+			t.Fatalf("duplicate destination planned: %v", err)
+		}
+	})
+	t.Run("CODEX_HOME changed", func(t *testing.T) {
+		home, repo := fileEnvironment(t)
+		t.Setenv("CODEX_HOME", filepath.Join(home, "codex-a"))
+		writeCatalogWithFiles(t, repo, "test-catalog", instructions[:2], nil)
+		if _, _, err := Enroll(repo, "test", "", false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Apply("all", "test"); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CODEX_HOME", filepath.Join(home, "codex-b"))
+		plan, err := Plan("all")
+		if err != nil {
+			t.Fatalf("changed CODEX_HOME failed the whole plan: %v", err)
+		}
+		if action := actionByIDOrFail(t, plan, "instruction/codex-global"); action.Action != "blocked_drift" || action.Reason != "CODEX_HOME changed" {
+			t.Fatalf("codex action %#v", action)
+		}
+		if action := actionByIDOrFail(t, plan, "instruction/claude-global"); action.Action != "noop" {
+			t.Fatalf("unrelated item affected: %#v", action)
+		}
+	})
+}
+
+func TestSymlinkedDestinationAncestorBlocksManagedFile(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	writeCatalogWithFiles(t, repo, "test-catalog", nil, []FileItem{{Target: "opencode-plugin", Name: "p.js", Source: "files/p.js"}})
+	elsewhere := filepath.Join(filepath.Dir(home), "elsewhere")
+	if err := os.MkdirAll(filepath.Join(elsewhere, "plugins"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(home, "config", "opencode")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	id := "file/opencode-plugin/p.js"
+	if action := actionByIDOrFail(t, mustPlan(t, "all"), id); action.Action != "blocked_collision" || action.Reason != "destination path contains a symlink" {
+		t.Fatalf("symlinked ancestor action %#v", action)
+	}
+	result, err := ApplyWithOptions("all", "test", ApplyOptions{Decisions: map[string]CollisionDecision{id: CollisionReplace}})
+	if err != nil || !blocked(result) || actionByIDOrFail(t, result, id).Reason != "replace not possible: destination path contains a symlink" {
+		t.Fatalf("apply: %#v %v", result, err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(elsewhere, "plugins")); len(entries) != 0 {
+		t.Fatalf("wrote through symlinked ancestor: %v", entries)
+	}
+}
+
 func TestCodexGlobalCreateAdoptDriftAndRestore(t *testing.T) {
 	codex := []Instruction{{Target: "codex-global", Source: "instructions/codex.md"}}
 	t.Run("created", func(t *testing.T) {

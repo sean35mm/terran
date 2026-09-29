@@ -92,7 +92,8 @@ Command Center names are a convention the user chooses (for example `cc1`,
 Every command accepts `--json` and writes one JSON object to stdout. JSON that
 Terran writes to disk has sorted keys. Errors in `--json` mode look like
 `{"schema_version":2,"error":{"code":"...","message":"...","next":"..."}}` and
-also print `terran: ...` to stderr. Paths below are shortened as `<home>` and
+also print `terran: ...` to stderr. `message` is the command context followed
+by the full error text, for example `apply failed: <error>`. Paths below are shortened as `<home>` and
 `<catalog>`.
 
 ```text
@@ -129,7 +130,9 @@ Read-only. Exit `0` unblocked, `1` operational, `2` usage, `3` blocked.
 Item ids are stable: `skill/<target>/<skill>`, `instruction/<target>`,
 `config/<target>`, `file/<target>/<name>`, `json-keys/<target>/<key>`.
 `clean` is true only when every action is `noop`, `held`, or `excluded`. The
-`digest` covers the actions and the catalog contents.
+`digest` covers the actions, the catalog contents, and the current content at
+each `blocked_collision` destination, so a collision edited after review fails
+`--expect`.
 
 ### apply
 
@@ -152,6 +155,9 @@ terran apply --expect 96bb...9c8 --decide instruction/claude-global=replace --js
   in the current plan (otherwise usage error, nothing changed). `replace`
   backs up the existing value privately and installs the catalog version.
   `keep` leaves the destination alone and holds the item on this machine.
+  A `replace` Terran cannot perform leaves the item `blocked_collision` with a
+  reason starting `replace not possible:`. If the changes commit but the holds
+  for `keep` decisions cannot be saved, apply fails with `partial_apply`.
 - `--expect` fails with `plan_changed` if the digest no longer matches.
 - Undecided collisions and any drift block the whole apply (exit `3`).
 
@@ -172,13 +178,17 @@ Read-only.
   ```
 
   `STATE` is `clean`, `clean (N held)`, `drift: N`, `blocked: N`,
-  `unhealthy`, `offline` (SSH failed), `terran not found`, or
-  `incompatible terran`. With `--json`:
+  `unhealthy`, `offline` (SSH failed), `terran not found`,
+  `incompatible terran`, or `<code>: <message>` when the remote Terran reported
+  a JSON error. A reachable row appends `, N tools missing` when catalog tools
+  are not on the remote `PATH` (`tools_missing`). Non-interactive SSH often has
+  a shorter `PATH`, so missing tools alone do not make a row `unhealthy`. With
+  `--json`:
 
   ```json
   {"schema_version":2,"command_centers":[
-    {"name":"cc1","platform":"darwin","local":true,"reachable":true,"terran_version":"0.4.0","catalog_commit":"9d467fb","overlay_commit":"4e1a2c0","clean":true,"healthy":true,"held":1,"drifted":0,"blocked":0},
-    {"name":"cc3","platform":"linux","local":false,"reachable":false,"clean":false,"healthy":false,"held":0,"drifted":0,"blocked":0,"error":"offline"}
+    {"name":"cc1","platform":"darwin","local":true,"reachable":true,"terran_version":"0.4.0","catalog_commit":"9d467fb","overlay_commit":"4e1a2c0","clean":true,"healthy":true,"held":1,"drifted":0,"blocked":0,"tools_missing":0},
+    {"name":"cc3","platform":"linux","local":false,"reachable":false,"clean":false,"healthy":false,"held":0,"drifted":0,"blocked":0,"tools_missing":0,"error":"offline"}
   ]}
   ```
 
@@ -192,9 +202,11 @@ Read-only.
   ```
 
 - `terran status NAME`: the same item-level output for another Command Center,
-  fetched over SSH and passed through as the remote returned it. Read-only in
-  this release. An unreachable machine fails with `unreachable`. Naming this
-  machine is a usage error.
+  including that machine's paths, fetched over SSH. The remote output is
+  strictly decoded as a status result (or, on exit `1`, a JSON error) and
+  re-encoded; anything else fails as `incompatible terran`. Read-only in this
+  release. An unreachable machine fails with `unreachable`. Naming this machine
+  is a usage error.
 - `terran status --summary --json`: this machine's one-line fleet summary. It
   is what other machines run over SSH.
 
@@ -295,12 +307,13 @@ reports the matching status.
 | Code | Meaning | Next step |
 | --- | --- | --- |
 | `not_enrolled` | No enrollment on this machine. | Enroll, via `terran-provision`. |
-| `manifest_invalid` | A `terran.json`, source, or `command-centers.json` is invalid, or two catalogs declare the same item. | Fix the named catalog, then `terran plan`. |
+| `manifest_invalid` | A `terran.json`, source, or `command-centers.json` is invalid, two catalogs declare the same item, or two items resolve to the same destination (for example `CODEX_HOME` pointing at the OpenCode directory). | Fix the named catalog or environment variable, then `terran plan`. |
 | `receipt_invalid` | The receipt is unreadable or inconsistent. | Do not edit state; run `terran doctor`; report to the user. |
 | `unsafe_state` | Enrollment or state files have unsafe ownership, mode, or content. | Do not edit state; run `terran doctor`; report to the user. |
 | `repository_mismatch` | The enrolled catalog changed, or an overlay change would strand owned items. | Restore the catalog, or remove overlay-owned items and apply before changing the overlay. |
 | `overlay_unavailable` | The enrolled private overlay is missing, moved, or invalid. | Clone it back to the recorded path or re-enroll. Terran fails closed so nothing is removed. |
-| `plan_changed` | The `--expect` digest no longer matches, or a settings file changed after planning. | Run `terran plan --json` again, show the user, get approval again. |
+| `plan_changed` | The `--expect` digest no longer matches, or a settings file changed after planning (including while apply was writing it; the other writer's file is kept). | Run `terran plan --json` again, show the user, get approval again. |
+| `partial_apply` | Apply committed its changes and receipt, but the holds for `keep` decisions were not saved. | Run `terran hold ITEM_ID` for each kept item named in `message`, then `terran plan --json`. |
 | `unknown_item` | The item id is malformed or not in the plan. | List ids with `terran plan --json`. |
 | `unreachable` | `terran status NAME` could not reach the machine over SSH. | Check SSH access and `~/.local/bin/terran` on that machine. |
 | `usage` | Bad flags, or `--decide` for an item that is not a `blocked_collision`. | Fix the command (exit `2`). |
@@ -434,7 +447,10 @@ manifests are still read and upgraded in memory):
   JSON object holding only the keys Terran owns.
 - `tools`: names matching `^[a-z0-9][a-z0-9._-]{0,63}$`.
 - Any entry may carry `platforms` (`darwin`, `linux`). Without it the entry
-  applies everywhere; on another platform it plans as `excluded`.
+  applies everywhere; on another platform it plans as `excluded`. Adding
+  `platforms` to an item a machine already owns does not exclude it there: that
+  machine plans `remove` (or `restore`, or `release` for an adopted settings
+  key), exactly as if the item had left the catalog.
 
 Sources are clean relative paths inside the catalog. Unknown fields, duplicate
 targets or names, unsafe or escaping paths, symlinks, multiple hard links,
@@ -447,8 +463,8 @@ strategies, modes, commands, or hooks.
 
 Every earlier v1 enrollment, receipt, and manifest is upgraded to v2 in memory
 and rewritten as v2 the next time Terran saves state. Earlier binaries cannot
-read v2 state, so update every machine to Terran 0.4 before a catalog uses v2
-features.
+read v2 state or v2 manifests. The default catalog is itself schema version 2,
+so upgrade the binary on every machine to Terran 0.4 before pulling it.
 
 ## Private overlay and fleet inventory
 
@@ -540,10 +556,15 @@ A differing existing item that Terran does not own is a `blocked_collision`.
 - `--decide <id>=keep`: the destination is left untouched and the item is held on
   this machine (`held`), so later plans skip it. `terran unhold <id>` reverses it.
 
-Only safe items can be replaced: regular, non-symlink, single-link,
-effective-user-owned files in safe parents. Symlinks, hard links, directories,
-devices, and unsafe files or parents remain blocked. All decisions and state are
-revalidated before the first change.
+For instructions, configs, and files, only safe items can be replaced: regular,
+non-symlink, single-link, effective-user-owned files in safe parents. Symlinks,
+hard links, directories, devices, and unsafe files or parents remain blocked.
+For a skill, an existing directory or symlink is renamed into Terran's private
+backups (same filesystem only) and is not restored on removal; any other file
+type remains blocked. A destination whose path contains a symlink below `HOME`,
+`XDG_CONFIG_HOME`, or `CODEX_HOME` is blocked with `destination path contains a
+symlink` and cannot be replaced. All decisions and state are revalidated before
+the first change.
 
 Replacement writes and verifies the backup and a same-directory temporary file,
 atomically moves the expected destination into a private-name quarantine,
@@ -574,7 +595,13 @@ for a destination.
 
 For shared settings files, ownership is per top-level key: Terran sets or deletes
 only keys it owns and refuses to write if the file changed since it was planned
-(`plan_changed`).
+(`plan_changed`). An existing settings file is replaced with the same
+quarantine protocol, so a harness that writes it while apply runs keeps its
+bytes and apply fails with `plan_changed`.
+
+`codex-global` follows `CODEX_HOME`. If `CODEX_HOME` changes after Terran
+applied that instruction, only that item plans as `blocked_drift` (`CODEX_HOME
+changed`); restore the old value or decommission the item first.
 
 Preflight blocks all selected mutations on collision or drift. If a later
 mutation, validation, or receipt write fails, Terran rolls back already changed
@@ -630,8 +657,9 @@ and `doctor` print private absolute paths; redact them before sharing output.
 Terran runs two external programs, both with fixed arguments and never through a
 shell: `git rev-parse HEAD` (read-only, for catalog commits) and `ssh` for fleet
 status (`BatchMode`, a validated alias, running only `.local/bin/terran status`
-on the remote). Remote status returns only names, counts, versions, and commits,
-never file contents. See [SECURITY.md](SECURITY.md).
+on the remote). Fleet summaries return only names, counts, versions, and
+commits. `terran status NAME` returns that machine's item-level status, which
+includes its paths. Neither returns file contents. See [SECURITY.md](SECURITY.md).
 
 ## Development and release
 

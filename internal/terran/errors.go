@@ -14,7 +14,18 @@ const (
 	CodeUnknownItem        = "unknown_item"
 	CodeUnreachable        = "unreachable"
 	CodeUsage              = "usage"
+	CodePartialApply       = "partial_apply"
 )
+
+// ErrorEnvelope is the JSON object every command writes on failure.
+type ErrorEnvelope struct {
+	SchemaVersion int `json:"schema_version"`
+	Error         struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Next    string `json:"next,omitempty"`
+	} `json:"error"`
+}
 
 const (
 	nextEnroll   = "run terran enroll --repo <path> --name <ccN>; see README Agent guide"

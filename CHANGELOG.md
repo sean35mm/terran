@@ -7,19 +7,19 @@ All notable changes are documented here. Terran follows semantic versioning.
 Breaking:
 
 - Remove the interactive guided workflow (bare `terran` wizard) and every terminal prompt. Terran is now agent-only: it never prompts, detects terminals, or reads stdin. Collision decisions are flags: `terran apply --decide ITEM_ID=replace|keep`.
-- Manifest, enrollment, and receipt schema version 2. Schema 1 files are still read and upgraded in memory, then saved as schema 2. Earlier binaries cannot read schema 2 state, so update every machine to 0.4 before a catalog uses v2 features. JSON output reports `schema_version: 2`.
+- Manifest, enrollment, and receipt schema version 2. Schema 1 files are still read and upgraded in memory, then saved as schema 2. JSON output reports `schema_version: 2`. The default catalog's `terran.json` is itself schema version 2, so Terran 0.3 binaries cannot read it at all: upgrade the binary on every machine to 0.4 before pulling this catalog.
 - Remove the `terran-enroll` skill; `terran-provision` replaces it.
 
 Added:
 
-- `--json` on every command, with stable error objects (`code`, `message`, `next`) and distinct exit codes: 0 ok, 1 operational, 2 usage, 3 blocked.
+- `--json` on every command, with stable error objects (`code`, `message` with the full error text, `next`) and distinct exit codes: 0 ok, 1 operational, 2 usage, 3 blocked. `partial_apply` reports an apply that committed but could not save the holds for `keep` decisions.
 - Reviewed applies: `terran plan --json` reports a digest and `terran apply --expect DIGEST` fails with `plan_changed` if anything moved.
 - New targets: `codex-global`, `mise-config`, `mise-lock`, `claude-settings`, `t3-settings`, and named files for `claude-agent`, `claude-command`, `claude-hook`, `opencode-plugin`, `opencode-tool`, and `opencode-command`.
-- Catalog sections `files`, `json_keys` (per-key ownership of shared JSON settings files, preserving every other key), `tools` (checked by `terran doctor`), and per-item `platforms` (other-platform items plan as `excluded`).
+- Catalog sections `files`, `json_keys` (per-key ownership of shared JSON settings files, preserving every other key), `tools` (checked by `terran doctor`), and per-item `platforms` (other-platform items plan as `excluded`; adding `platforms` to an item a machine already owns plans `remove`, `restore`, or `release` there instead).
 - A private overlay catalog (`terran enroll --overlay`) that can only add items, with `overlay_unavailable` failing closed.
 - `terran hold` and `terran unhold` to pin items on one machine, and the `held`, `excluded`, and `release` actions.
 - `terran capture` to list unmanaged agent setup on this machine without printing values.
-- Fleet status: `command-centers.json` in the overlay, `terran status` (table or JSON), `terran status NAME` (read-only remote item status), `terran status --local`, and `terran status --summary`, using a fixed `ssh` command.
+- Fleet status: `command-centers.json` in the overlay, `terran status` (table or JSON), `terran status NAME` (read-only remote item status), `terran status --local`, and `terran status --summary`, using a fixed `ssh` command. Summaries report `tools_missing`, shown as `, N tools missing` without marking the machine unhealthy; a remote JSON error shows as `<code>: <message>`.
 - New skill `terran-provision` (fresh and existing machines, macOS and Omarchy references). Rewritten `terran-curate-skills`, `terran-diagnose`, and `terran-update` for the agent-first workflow.
 - Agent-first README and documentation site; expanded `SECURITY.md`.
 

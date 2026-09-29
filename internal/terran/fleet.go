@@ -3,6 +3,7 @@ package terran
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const (
@@ -49,7 +51,10 @@ type MachineSummary struct {
 	Held          int    `json:"held"`
 	Drifted       int    `json:"drifted"`
 	Blocked       int    `json:"blocked"`
-	Error         string `json:"error,omitempty"`
+	// ToolsMissing counts catalog tools not on PATH. They do not make a
+	// machine unhealthy: non-interactive ssh often has a shorter PATH.
+	ToolsMissing int    `json:"tools_missing"`
+	Error        string `json:"error,omitempty"`
 }
 
 // runSSH runs the remote terran with a fixed argument vector; nothing goes through a shell.
@@ -92,7 +97,9 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 var gitHead = func(repo string) (string, error) {
-	out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", repo, "rev-parse", "HEAD").Output()
 	if err != nil {
 		return "", err
 	}
@@ -179,7 +186,16 @@ func LocalSummary(buildVersion string) (MachineSummary, error) {
 		CatalogCommit: shortCommit(enrollment.RepositoryPath),
 		OverlayCommit: shortCommit(enrollment.OverlayPath),
 		Clean:         status.Clean,
-		Healthy:       Doctor(buildVersion).Healthy,
+		Healthy:       true,
+	}
+	for _, check := range Doctor(buildVersion).Checks {
+		switch {
+		case check.Status != "fail":
+		case strings.HasPrefix(check.Name, "tool:"):
+			summary.ToolsMissing++
+		default:
+			summary.Healthy = false
+		}
 	}
 	for _, item := range status.Items {
 		switch item.Status {
@@ -244,6 +260,9 @@ func remoteSummary(ctx context.Context, cc CommandCenter) MachineSummary {
 	out, err := runSSH(ctx, cc.SSH, "status", "--summary", "--json")
 	if err != nil {
 		row.Error = sshFailure(err)
+		if envelope, ok := remoteError(err, out); ok {
+			row.Error = envelope.Error.Code + ": " + envelope.Error.Message
+		}
 		return row
 	}
 	var remote MachineSummary
@@ -251,15 +270,37 @@ func remoteSummary(ctx context.Context, cc CommandCenter) MachineSummary {
 		row.Error = err.Error()
 		return row
 	}
-	if !summaryVersionPattern.MatchString(remote.TerranVersion) || (remote.CatalogCommit != "" && !summaryCommitPattern.MatchString(remote.CatalogCommit)) || (remote.OverlayCommit != "" && !summaryCommitPattern.MatchString(remote.OverlayCommit)) || remote.Held < 0 || remote.Drifted < 0 || remote.Blocked < 0 {
+	if !summaryVersionPattern.MatchString(remote.TerranVersion) || (remote.CatalogCommit != "" && !summaryCommitPattern.MatchString(remote.CatalogCommit)) || (remote.OverlayCommit != "" && !summaryCommitPattern.MatchString(remote.OverlayCommit)) || remote.Held < 0 || remote.Drifted < 0 || remote.Blocked < 0 || remote.ToolsMissing < 0 {
 		row.Error = "incompatible terran"
 		return row
 	}
 	row.Reachable = true
 	row.TerranVersion, row.CatalogCommit, row.OverlayCommit = remote.TerranVersion, remote.CatalogCommit, remote.OverlayCommit
 	row.Clean, row.Healthy = remote.Clean, remote.Healthy
-	row.Held, row.Drifted, row.Blocked = remote.Held, remote.Drifted, remote.Blocked
+	row.Held, row.Drifted, row.Blocked, row.ToolsMissing = remote.Held, remote.Drifted, remote.Blocked, remote.ToolsMissing
 	return row
+}
+
+var errorCodePattern = regexp.MustCompile(`^[a-z][a-z_]{0,31}$`)
+
+// remoteError decodes the JSON error envelope a remote terran writes to stdout
+// when it exits 1. Control characters in the message become spaces.
+func remoteError(err error, out []byte) (ErrorEnvelope, bool) {
+	var exit *exec.ExitError
+	var envelope ErrorEnvelope
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 || decodeStrict(out, &envelope) != nil || envelope.SchemaVersion != SchemaVersion || !errorCodePattern.MatchString(envelope.Error.Code) {
+		return ErrorEnvelope{}, false
+	}
+	clean := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return ' '
+			}
+			return r
+		}, s)
+	}
+	envelope.Error.Message, envelope.Error.Next = clean(envelope.Error.Message), clean(envelope.Error.Next)
+	return envelope, true
 }
 
 // sshFailure maps ssh exit codes: 255 is a connection failure, 127 a missing remote command.
@@ -280,8 +321,9 @@ func sshFailure(err error) string {
 	return "offline"
 }
 
-// RemoteStatus runs item-level status on the named inventory machine and returns its output as written.
-// clean is false when the remote reported non-clean state (exit 1 with output).
+// RemoteStatus runs item-level status on the named inventory machine and returns its output
+// strictly decoded and re-encoded: a StatusResult, or on exit 1 a StatusResult or error envelope.
+// clean is false when the remote exited 1.
 func RemoteStatus(name string, timeout time.Duration) (output []byte, clean bool, err error) {
 	paths, err := ResolvePaths()
 	if err != nil {
@@ -306,13 +348,24 @@ func RemoteStatus(name string, timeout time.Duration) (output []byte, clean bool
 		defer cancel()
 		out, err := runSSH(ctx, cc.SSH, "status", "--local", "--json")
 		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == 1 && len(out) > 0 {
-			return out, false, nil
-		}
-		if err != nil {
+		nonClean := errors.As(err, &exit) && exit.ExitCode() == 1 && len(out) > 0
+		if err != nil && !nonClean {
 			return nil, false, Coded(CodeUnreachable, "check ssh access and that terran is installed at ~/.local/bin/terran on "+name, fmt.Errorf("%s: %s", name, sshFailure(err)))
 		}
-		return out, true, nil
+		var decoded any
+		var result StatusResult
+		if decodeStrict(out, &result) == nil && result.SchemaVersion == SchemaVersion {
+			decoded = result
+		} else if envelope, ok := remoteError(err, out); ok {
+			decoded = envelope
+		} else {
+			return nil, false, Coded(CodeOperational, "install the same terran version on "+name, fmt.Errorf("%s: incompatible terran", name))
+		}
+		data, err := json.Marshal(decoded)
+		if err != nil {
+			return nil, false, err
+		}
+		return append(data, '\n'), !nonClean, nil
 	}
 	return nil, false, Coded(CodeUsage, "", fmt.Errorf("unknown command center %q", name))
 }

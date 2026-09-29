@@ -198,6 +198,26 @@ func TestJSONKeysLifecycleKeepsUnownedKeys(t *testing.T) {
 	}
 }
 
+// The receipt is written indented; an adopted object value must still compare
+// equal to its applied hash so removal releases it instead of restoring.
+func TestJSONKeysAdoptedObjectValueReleases(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	claudeSettings(t, home, `{"a":{"b":[1,2],"c":"<x>"}}`, 0o644)
+	writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"claude-settings": `{"a":{"c":"<x>","b":[1,2]}}`})
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	assertJSONKeyPlan(t, map[string]string{"a": "adopt"})
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if keys := loadTestReceipt(t).JSONKeys; len(keys) != 1 || string(keys[0].OriginalValue) != `{"b":[1,2],"c":"<x>"}` {
+		t.Fatalf("receipt original value not canonical: %#v", keys)
+	}
+	writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"claude-settings": `{}`})
+	assertJSONKeyPlan(t, map[string]string{"a": "release"})
+}
+
 func TestJSONKeysCreateFileOnlyUnderExistingParent(t *testing.T) {
 	home, repo := fileEnvironment(t)
 	writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"t3-settings": `{"theme":"dark"}`})
@@ -402,6 +422,55 @@ func TestJSONKeysUnownedChangeAfterPlanIsPlanChanged(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(home, ".claude", "CLAUDE.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("instruction mutated despite plan_changed: %v", err)
+	}
+}
+
+// A harness writing the settings file after apply verified it, but before the
+// replacement, must win: plan_changed, its bytes kept, the receipt unchanged.
+func TestJSONKeysConcurrentWriteAfterVerifyIsPlanChanged(t *testing.T) {
+	writers := map[string]func(path string, data []byte) error{
+		"in place": func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		"rename": func(path string, data []byte) error {
+			tmp := path + ".tmp"
+			if err := os.WriteFile(tmp, data, 0o644); err != nil {
+				return err
+			}
+			return os.Rename(tmp, path)
+		},
+	}
+	for name, write := range writers {
+		t.Run(name, func(t *testing.T) {
+			home, repo := fileEnvironment(t)
+			settings := claudeSettings(t, home, `{"theme":"dark"}`, 0o644)
+			writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"claude-settings": `{"model":"opus"}`})
+			if _, _, err := Enroll(repo, "test", "", false); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Apply("all", "test"); err != nil {
+				t.Fatal(err)
+			}
+			writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"claude-settings": `{"model":"opus","permissions":{"allow":["Read"]}}`})
+			paths, _ := ResolvePaths()
+			receiptBefore, err := os.ReadFile(paths.Receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			injected := []byte("{\"model\":\"opus\",\"theme\":\"light\"}\n")
+			beforeJSONKeysWrite = func(destination string) error { return write(destination, injected) }
+			t.Cleanup(func() { beforeJSONKeysWrite = nil })
+			if _, err := Apply("all", "test"); !hasCode(err, CodePlanChanged) {
+				t.Fatalf("concurrent write: %v", err)
+			}
+			if data, _ := os.ReadFile(settings); !bytes.Equal(data, injected) {
+				t.Fatalf("concurrent writer's bytes lost: %s", data)
+			}
+			if receiptAfter, _ := os.ReadFile(paths.Receipt); !bytes.Equal(receiptAfter, receiptBefore) {
+				t.Fatal("receipt changed by refused apply")
+			}
+			if entries, _ := os.ReadDir(filepath.Dir(settings)); len(entries) != 1 {
+				t.Fatalf("quarantine or temp files left behind: %v", entries)
+			}
+		})
 	}
 }
 

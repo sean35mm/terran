@@ -397,23 +397,16 @@ func commandHelpRequested(args []string) bool {
 	return len(args) == 1 && (args[0] == "--help" || args[0] == "-h")
 }
 
-type errorOutput struct {
-	SchemaVersion int `json:"schema_version"`
-	Error         struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-		Next    string `json:"next,omitempty"`
-	} `json:"error"`
-}
-
-func jsonOperational(stdout, stderr io.Writer, message string, err error) int {
-	writeJSONError(stdout, stderr, message, err)
+// jsonOperational reports err as a JSON error whose message is the context
+// followed by the full error text.
+func jsonOperational(stdout, stderr io.Writer, context string, err error) int {
+	writeJSONError(stdout, stderr, context+": "+err.Error(), err)
 	return 1
 }
 
 func writeJSONError(stdout, stderr io.Writer, message string, err error) {
 	code, next := terran.ErrorCode(err)
-	result := errorOutput{SchemaVersion: terran.SchemaVersion}
+	result := terran.ErrorEnvelope{SchemaVersion: terran.SchemaVersion}
 	result.Error.Code = code
 	result.Error.Message = message
 	result.Error.Next = next

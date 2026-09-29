@@ -114,22 +114,27 @@ func writeFleetTable(w io.Writer, rows []terran.MachineSummary) error {
 }
 
 func machineState(row terran.MachineSummary) string {
-	switch {
-	case !row.Reachable:
+	if !row.Reachable {
 		if row.Error == "" {
 			return "offline"
 		}
 		return row.Error
-	case row.Blocked > 0:
-		return fmt.Sprintf("blocked: %d", row.Blocked)
-	case row.Drifted > 0:
-		return fmt.Sprintf("drift: %d", row.Drifted)
-	case !row.Clean || !row.Healthy:
-		return "unhealthy"
-	case row.Held > 0:
-		return fmt.Sprintf("clean (%d held)", row.Held)
 	}
-	return "clean"
+	state := "clean"
+	switch {
+	case row.Blocked > 0:
+		state = fmt.Sprintf("blocked: %d", row.Blocked)
+	case row.Drifted > 0:
+		state = fmt.Sprintf("drift: %d", row.Drifted)
+	case !row.Clean || !row.Healthy:
+		state = "unhealthy"
+	case row.Held > 0:
+		state = fmt.Sprintf("clean (%d held)", row.Held)
+	}
+	if row.ToolsMissing > 0 {
+		state += fmt.Sprintf(", %d tools missing", row.ToolsMissing)
+	}
+	return state
 }
 
 func dash(s string) string {

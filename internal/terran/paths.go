@@ -82,6 +82,50 @@ func managedFileDestination(paths Paths, kind, target, name string) (string, err
 	return spec.Dest(paths, name)
 }
 
+var errDestinationSymlink = errors.New("destination path contains a symlink")
+
+// resolveDestination returns a managed-file or settings destination with its
+// deepest existing ancestor resolved through symlinks. The fixed root it lives
+// under (the deepest of HOME, XDG_CONFIG_HOME, and CODEX_HOME) may itself be a
+// symlink, but no existing directory below that root may be: a symlinked
+// ancestor would redirect writes away from the fixed destination.
+func resolveDestination(paths Paths, destination string) (string, error) {
+	root := ""
+	for _, candidate := range []string{paths.Home, paths.ConfigBase, paths.CodexHome} {
+		if contained(candidate, destination) && len(candidate) > len(root) {
+			root = candidate
+		}
+	}
+	if root == "" {
+		return "", fmt.Errorf("destination %s is outside HOME, XDG_CONFIG_HOME, and CODEX_HOME", destination)
+	}
+	existing := filepath.Dir(destination)
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		existing = filepath.Dir(existing)
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", errDestinationSymlink
+	}
+	if contained(root, existing) {
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return "", err
+		}
+		below, _ := filepath.Rel(root, existing)
+		if resolved != filepath.Join(resolvedRoot, below) {
+			return "", errDestinationSymlink
+		}
+	}
+	rest, _ := filepath.Rel(existing, destination)
+	return filepath.Join(resolved, rest), nil
+}
+
 func instructionBackup(paths Paths, target string) string {
 	return filepath.Join(paths.BackupDir, target, "original")
 }

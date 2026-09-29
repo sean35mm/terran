@@ -20,7 +20,7 @@ Each item has an `id`, a `kind` (`unmanaged_entry` or `unowned_key`), a `target`
 For each item decide:
 
 1. **Public or private.** Public only if the license allows redistribution and nothing in it is personal, secret, or machine-specific. Everything else goes in the private overlay. When unsure, choose private and say why.
-2. **Platform tags.** Add `"platforms": ["darwin"]` or `["linux"]` when the item only works on one. No `platforms` means every platform. Items for other platforms appear as `excluded`, which is expected.
+2. **Platform tags.** Add `"platforms": ["darwin"]` or `["linux"]` when the item only works on one. No `platforms` means every platform. Items for other platforms appear as `excluded`, which is expected. Adding `platforms` to an item a machine already owns is different: that machine plans `remove`, `restore`, or `release`, as if the item left the catalog. Show the user those removals before applying.
 3. **Keep, rewrite, or drop.** Keep as is when it is precise and safe; rewrite to fix trigger scope, provenance, or portability; drop when redundant or stale. Removing an item needs the user's intent, not just missing telemetry.
 
 For every candidate review provenance and revision, license and notice duties (update `THIRD_PARTY_NOTICES.md` and keep the upstream license file with adapted skills), supported platforms, runtime dependencies, secret and network boundaries, and overlap with existing items. Prefer a small attributed adaptation to bulk-copying an upstream tree.

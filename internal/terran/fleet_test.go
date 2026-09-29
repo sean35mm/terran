@@ -99,6 +99,47 @@ func TestFleetStatusMixedResults(t *testing.T) {
 	}
 }
 
+func TestFleetStatusRemoteErrorEnvelopeAndMissingTools(t *testing.T) {
+	fleetEnvironment(t, `{"schema_version":1,"command_centers":[{"name":"cc2","platform":"linux","ssh":"cc2"},{"name":"cc3","platform":"linux","ssh":"cc3"}]}`)
+	stubSSH(t, func(ctx context.Context, alias string, args ...string) ([]byte, error) {
+		if alias == "cc2" {
+			return []byte(`{"schema_version":2,"error":{"code":"not_enrolled","message":"status failed: lstat x:\nno such file","next":"enroll"}}`), exitError(t, "1")
+		}
+		return []byte(`{"name":"x","platform":"linux","local":false,"reachable":true,"terran_version":"0.4.0","clean":true,"healthy":true,"held":0,"drifted":0,"blocked":0,"tools_missing":2}`), nil
+	})
+	rows, err := FleetStatus("0.4.0", time.Second)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("%#v %v", rows, err)
+	}
+	if cc2 := rows[1]; cc2.Reachable || cc2.Error != "not_enrolled: status failed: lstat x: no such file" {
+		t.Fatalf("error envelope row %#v", cc2)
+	}
+	if cc3 := rows[2]; !cc3.Reachable || !cc3.Healthy || cc3.ToolsMissing != 2 {
+		t.Fatalf("tools row %#v", cc3)
+	}
+}
+
+func TestLocalSummaryCountsMissingToolsWithoutUnhealthy(t *testing.T) {
+	_, repo := testEnvironment(t)
+	manifest := `{"schema_version":2,"id":"test-catalog","version":"0.4.0","projections":[{"skill":"example","source":"skills/example","targets":["agents"]}],"tools":[{"name":"terran-test-missing-tool"}]}`
+	if err := os.WriteFile(filepath.Join(repo, "terran.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "cc1", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "0.4.0"); err != nil {
+		t.Fatal(err)
+	}
+	previous := gitHead
+	gitHead = func(string) (string, error) { return "5aeb5d4c0ffee", nil }
+	t.Cleanup(func() { gitHead = previous })
+	summary, err := LocalSummary("0.4.0")
+	if err != nil || summary.ToolsMissing != 1 || !summary.Healthy || !summary.Clean {
+		t.Fatalf("summary %#v %v; doctor %#v", summary, err, Doctor("0.4.0"))
+	}
+}
+
 func TestFleetStatusWithoutInventoryOrOverlayIsLocalOnly(t *testing.T) {
 	stubSSH(t, func(context.Context, string, ...string) ([]byte, error) {
 		t.Error("ssh must not run")
@@ -219,17 +260,27 @@ func TestRemoteStatus(t *testing.T) {
 		}
 		switch alias {
 		case "cc2":
-			return []byte(`{"clean":true}`), nil
+			return []byte(`{"schema_version":2,"clean":true,"items":[]}`), nil
 		case "cc3":
-			return []byte(`{"clean":false}`), exitError(t, "1")
+			return []byte(` {"schema_version":2, "clean":false, "items":[{"id":"skill/agents/a","kind":"skill","target":"agents","status":"drift","source":"/s","destination":"/d"}]}`), exitError(t, "1")
+		case "cc5":
+			return []byte(`{"schema_version":2,"error":{"code":"not_enrolled","message":"status failed"}}`), exitError(t, "1")
+		case "cc10":
+			return []byte(`{"schema_version":2,"clean":true,"items":[],"extra":"\u001b[2J"}`), nil
 		}
 		return nil, errors.New("down")
 	})
-	if out, clean, err := RemoteStatus("cc2", time.Second); err != nil || !clean || string(out) != `{"clean":true}` {
+	if out, clean, err := RemoteStatus("cc2", time.Second); err != nil || !clean || string(out) != "{\"schema_version\":2,\"clean\":true,\"items\":[]}\n" {
 		t.Fatalf("cc2: %s %v %v", out, clean, err)
 	}
-	if out, clean, err := RemoteStatus("cc3", time.Second); err != nil || clean || string(out) != `{"clean":false}` {
+	if out, clean, err := RemoteStatus("cc3", time.Second); err != nil || clean || !strings.HasPrefix(string(out), `{"schema_version":2,"clean":false,"items":[{"id":"skill/agents/a"`) {
 		t.Fatalf("cc3: %s %v %v", out, clean, err)
+	}
+	if out, clean, err := RemoteStatus("cc5", time.Second); err != nil || clean || string(out) != "{\"schema_version\":2,\"error\":{\"code\":\"not_enrolled\",\"message\":\"status failed\"}}\n" {
+		t.Fatalf("cc5: %s %v %v", out, clean, err)
+	}
+	if out, _, err := RemoteStatus("cc10", time.Second); err == nil || !strings.Contains(err.Error(), "incompatible terran") {
+		t.Fatalf("cc10 unknown field accepted: %s %v", out, err)
 	}
 	if _, _, err := RemoteStatus("cc4", time.Second); !hasCode(err, CodeUnreachable) {
 		t.Fatalf("cc4: %v", err)

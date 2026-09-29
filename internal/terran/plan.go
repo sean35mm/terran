@@ -133,7 +133,10 @@ func LoadReceipt(paths Paths, enrollment Enrollment) (receipt Receipt, err error
 			return Receipt{}, fmt.Errorf("duplicate receipt %s", managed.Kind)
 		}
 		seen[key] = true
-		if managed.Destination != destination || !filepath.IsAbs(managed.Source) || filepath.Clean(managed.Source) != managed.Source || !contained(repository, managed.Source) {
+		// codex-global follows CODEX_HOME, which may have changed since apply;
+		// the plan then blocks only that item as drift.
+		codexMoved := key == "instruction/codex-global" && filepath.IsAbs(managed.Destination) && filepath.Clean(managed.Destination) == managed.Destination && filepath.Base(managed.Destination) == "AGENTS.md"
+		if (managed.Destination != destination && !codexMoved) || !filepath.IsAbs(managed.Source) || filepath.Clean(managed.Source) != managed.Source || !contained(repository, managed.Source) {
 			return Receipt{}, fmt.Errorf("unsafe receipt %s paths for %s", managed.Kind, managed.Target)
 		}
 		switch managed.Origin {
@@ -150,7 +153,7 @@ func LoadReceipt(paths Paths, enrollment Enrollment) (receipt Receipt, err error
 		}
 	}
 	seen = map[string]bool{}
-	for _, entry := range receipt.JSONKeys {
+	for i, entry := range receipt.JSONKeys {
 		_, known := catalogRepository(entry.Catalog)
 		_, supported := lookupTarget("json-keys", entry.Target)
 		id := ItemID("json-keys", entry.Target, entry.Key)
@@ -164,9 +167,11 @@ func LoadReceipt(paths Paths, enrollment Enrollment) (receipt Receipt, err error
 				return Receipt{}, fmt.Errorf("invalid created json key receipt for %s", id)
 			}
 		case "adopted":
-			if len(entry.OriginalValue) == 0 || !json.Valid(entry.OriginalValue) {
+			canonical, err := canonicalRaw(entry.OriginalValue)
+			if len(entry.OriginalValue) == 0 || err != nil {
 				return Receipt{}, fmt.Errorf("invalid adopted json key receipt for %s", id)
 			}
+			receipt.JSONKeys[i].OriginalValue = canonical
 		default:
 			return Receipt{}, fmt.Errorf("invalid json key origin for %s", id)
 		}
@@ -312,6 +317,22 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 			return "blocked_drift", "receipt-owned projection is missing or changed"
 		})
 	}
+	// Two desired items must never write one path, e.g. when CODEX_HOME points
+	// at another harness's directory.
+	claimed := map[string]string{}
+	claim := func(destination, owner string) error {
+		if prior, ok := claimed[destination]; ok && prior != owner {
+			return Coded(CodeManifestInvalid, "set CODEX_HOME and XDG_CONFIG_HOME so each item has its own destination", fmt.Errorf("%s and %s both resolve to %s", prior, owner, destination))
+		}
+		claimed[destination] = owner
+		return nil
+	}
+	// insideCatalog checks the lexical destination and, when it resolves, the
+	// real path behind a symlinked HOME or XDG root.
+	insideCatalog := func(destination string) bool {
+		resolved, err := resolveDestination(paths, destination)
+		return catalogs.insideAny(destination) || (err == nil && catalogs.insideAny(resolved))
+	}
 	desiredManaged := map[string]bool{}
 	for _, loaded := range catalogs.list() {
 		for _, item := range loaded.managedItems() {
@@ -319,7 +340,7 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 				continue
 			}
 			destination, _ := managedFileDestination(paths, item.Kind, item.Target, item.Name)
-			if catalogs.insideAny(destination) {
+			if insideCatalog(destination) {
 				return PlanResult{}, fmt.Errorf("%s destination for %s must not be inside a catalog repository", item.Kind, managedLabel(item.Target, item.Name))
 			}
 			action := Action{ID: item.id(), Kind: item.Kind, Catalog: loaded.Manifest.ID, Target: item.Target, Name: item.Name, Source: item.Source, Destination: destination}
@@ -331,6 +352,9 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 				continue
 			}
 			desiredManaged[action.ID] = true
+			if err := claim(destination, action.ID); err != nil {
+				return PlanResult{}, err
+			}
 			add(action, func() (string, string) {
 				return classifyInstruction(paths, action, item.Hash, prior, owned)
 			})
@@ -353,7 +377,7 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 	inspect := func(target, destination string) jsonSettings {
 		file, ok := jsonFiles[target]
 		if !ok {
-			file = inspectJSONSettings(destination)
+			file = inspectJSONSettings(paths, destination)
 			jsonFiles[target] = file
 		}
 		return file
@@ -365,8 +389,13 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 				continue
 			}
 			destination, _ := jsonKeysDestination(paths, item.Target)
-			if catalogs.insideAny(destination) {
+			if insideCatalog(destination) {
 				return PlanResult{}, fmt.Errorf("json-keys destination for %s must not be inside a catalog repository", item.Target)
+			}
+			if platformIncluded(item.Platforms) {
+				if err := claim(destination, ItemID("json-keys", item.Target, "")); err != nil {
+					return PlanResult{}, err
+				}
 			}
 			for key, value := range loaded.JSONKeyValues[item.Target] {
 				action := Action{ID: ItemID("json-keys", item.Target, key), Kind: "json-keys", Catalog: loaded.Manifest.ID, Target: item.Target, Name: key, Source: loaded.JSONKeySources[item.Target], Destination: destination}
@@ -415,25 +444,93 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 			clean = false
 		}
 	}
-	plan := PlanResult{SchemaVersion: SchemaVersion, Clean: clean, Actions: actions, jsonFiles: map[string]string{}}
+	plan := PlanResult{SchemaVersion: SchemaVersion, Clean: clean, Actions: actions, jsonFiles: map[string]string{}, collisions: map[string]string{}}
 	for target, file := range jsonFiles {
 		plan.jsonFiles[target] = file.hash
+	}
+	for _, action := range actions {
+		if action.Action != "blocked_collision" {
+			continue
+		}
+		if value, ok := jsonFiles[action.Target].values[action.Name]; action.Kind == "json-keys" && ok {
+			plan.collisions[action.ID] = hashBytes(value)
+		} else {
+			plan.collisions[action.ID] = contentHash(action.Destination)
+		}
 	}
 	plan.Digest = PlanDigest(plan, catalogs.Fingerprint)
 	return plan, nil
 }
 
 // PlanDigest identifies a plan and the catalogs it was computed from: sha256
-// over the canonical JSON of the actions sorted by item id, a newline, and the
-// catalogs fingerprint.
+// over the canonical JSON of the actions sorted by item id, a newline, the
+// catalogs fingerprint, and one "\n<id> <hash>" line per blocked collision
+// (sorted by id) binding the colliding content a decision was reviewed against.
 func PlanDigest(plan PlanResult, catalogsFingerprint string) string {
 	actions := append([]Action{}, plan.Actions...)
 	sort.Slice(actions, func(i, j int) bool { return actions[i].ID < actions[j].ID })
 	data, _ := json.Marshal(actions) // Action holds only strings; Marshal cannot fail
-	return hashBytes(append(append(data, '\n'), catalogsFingerprint...))
+	data = append(append(data, '\n'), catalogsFingerprint...)
+	for _, action := range actions {
+		if hash, ok := plan.collisions[action.ID]; ok {
+			data = append(data, "\n"+action.ID+" "+hash...)
+		}
+	}
+	return hashBytes(data)
+}
+
+// contentHash identifies what currently occupies a destination without
+// following symlinks: a file's bytes, a link's target, or a directory's sorted
+// relative paths, modes, and link targets.
+func contentHash(path string) string {
+	info, err := os.Lstat(path)
+	switch {
+	case err != nil:
+		return hashBytes([]byte("error: " + err.Error()))
+	case info.Mode()&os.ModeSymlink != 0:
+		link, _ := os.Readlink(path)
+		return hashBytes([]byte("link " + link))
+	case info.Mode().IsRegular():
+		hash, err := fileHash(path)
+		if err != nil {
+			return hashBytes([]byte("error: " + err.Error()))
+		}
+		return hash
+	case !info.IsDir():
+		return hashBytes([]byte("mode " + info.Mode().String()))
+	}
+	var listing strings.Builder
+	_ = filepath.WalkDir(path, func(current string, entry os.DirEntry, err error) error {
+		relative, _ := filepath.Rel(path, current)
+		if err != nil {
+			fmt.Fprintf(&listing, "%s error\n", relative)
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			fmt.Fprintf(&listing, "%s error\n", relative)
+			return nil
+		}
+		link := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, _ = os.Readlink(current)
+		}
+		fmt.Fprintf(&listing, "%q %s %q\n", relative, info.Mode(), link)
+		return nil
+	})
+	return hashBytes([]byte(listing.String()))
 }
 
 func classifyInstruction(paths Paths, action Action, sourceHash string, prior ReceiptManaged, owned bool) (string, string) {
+	if owned && prior.Destination != action.Destination {
+		return "blocked_drift", "CODEX_HOME changed"
+	}
+	if _, err := resolveDestination(paths, action.Destination); err != nil {
+		if owned {
+			return "blocked_drift", err.Error()
+		}
+		return "blocked_collision", err.Error()
+	}
 	parent := filepath.Dir(action.Destination)
 	if _, err := os.Lstat(parent); errors.Is(err, os.ErrNotExist) {
 		if owned {
@@ -524,6 +621,12 @@ func validateProspectiveInstructionParent(parent string) error {
 }
 
 func classifyInstructionRemoval(paths Paths, prior ReceiptManaged, destination string) (string, string) {
+	if prior.Destination != destination {
+		return "blocked_drift", "CODEX_HOME changed"
+	}
+	if _, err := resolveDestination(paths, destination); err != nil {
+		return "blocked_drift", err.Error()
+	}
 	if err := validateInstructionParent(destination); err != nil {
 		return "blocked_drift", err.Error()
 	}
@@ -734,11 +837,10 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 				if err != nil {
 					return err
 				}
-				var eligible bool
-				state, eligible = resolvableCollision(paths, loaded, action)
-				if !eligible {
-					if hasDecision && action.Kind == "skill" {
-						result.Actions[i].Reason = "backup not possible"
+				state, err = resolvableCollision(paths, loaded, action)
+				if err != nil {
+					if hasDecision {
+						result.Actions[i].Reason = "replace not possible: " + err.Error()
 					}
 					continue
 				}
@@ -807,7 +909,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		}
 		jsonTargets := jsonTargetsToVerify(result)
 		for _, jsonTarget := range jsonTargets {
-			if _, _, err := verifyJSONSettings(paths, catalogs, result, jsonTarget); err != nil {
+			if _, _, _, err := verifyJSONSettings(paths, catalogs, result, jsonTarget); err != nil {
 				return err
 			}
 		}
@@ -1048,10 +1150,13 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			}
 		}
 		// Kept collisions were never touched, so their holds are written last.
-		for _, id := range kept {
-			var holdErr error
-			if enrollment, holdErr = holdLocked(paths, enrollment, id, true); holdErr != nil {
-				return fmt.Errorf("hold %s: %w", id, holdErr)
+		// Their ids come from this plan and none is already held.
+		if len(kept) > 0 {
+			updated := enrollment
+			updated.Holds = append(append([]string(nil), enrollment.Holds...), kept...)
+			sort.Strings(updated.Holds)
+			if _, err := writeEnrollment(paths, updated); err != nil {
+				return Coded(CodePartialApply, "run terran hold ITEM_ID for each kept item, then terran plan", fmt.Errorf("apply was committed but holds for %s were not saved: %w", strings.Join(kept, ", "), err))
 			}
 		}
 		return nil
@@ -1078,8 +1183,8 @@ func CanResolveCollision(action Action) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, eligible := resolvableCollision(paths, loaded, action)
-	return eligible, nil
+	_, ineligible := resolvableCollision(paths, loaded, action)
+	return ineligible == nil, nil
 }
 
 func appendReceiptWarning(plan *PlanResult, warning string) {
@@ -1184,112 +1289,131 @@ func safelyRemoveInstructionBackup(path string) error {
 
 func managedActionKey(action Action) string { return action.ID }
 
-func resolvableCollision(paths Paths, loaded LoadedManifest, action Action) (resolvedCollision, bool) {
-	var state resolvedCollision
+// resolvableCollision reports whether a blocked collision can be replaced; the
+// error says why not.
+func resolvableCollision(paths Paths, loaded LoadedManifest, action Action) (resolvedCollision, error) {
 	switch action.Kind {
 	case "skill":
 		return resolvableSkillCollision(paths, loaded, action)
 	case "json-keys":
-		return resolvableJSONKeyCollision(loaded, action)
+		return resolvableJSONKeyCollision(paths, loaded, action)
 	}
 	if (action.Kind != "instruction" && action.Kind != "config" && action.Kind != "file") || action.Action != "blocked_collision" {
-		return state, false
+		return resolvedCollision{}, fmt.Errorf("not a managed-file collision")
+	}
+	if _, err := resolveDestination(paths, action.Destination); err != nil {
+		return resolvedCollision{}, err
 	}
 	if err := validateInstructionParent(action.Destination); err != nil {
-		return state, false
+		return resolvedCollision{}, err
 	}
 	source, desired := managedItemSource(loaded, action.Kind, action.Target, action.Name)
 	if !desired || source != action.Source {
-		return state, false
+		return resolvedCollision{}, fmt.Errorf("catalog source changed")
 	}
 	sourceBytes, err := readVerifiedManagedSource(loaded.Repository, action.Kind, action.Target, source, managedHash(loaded, action.Kind, action.Target, action.Name))
 	if err != nil {
-		return state, false
+		return resolvedCollision{}, err
 	}
 	original, mode, err := readSafeFile(action.Destination, "managed-file collision")
-	if err != nil || bytes.Equal(original, sourceBytes) {
-		return state, false
+	if err != nil {
+		return resolvedCollision{}, err
+	}
+	if bytes.Equal(original, sourceBytes) {
+		return resolvedCollision{}, fmt.Errorf("destination already matches the catalog")
 	}
 	info, err := os.Lstat(action.Destination)
 	if err != nil {
-		return state, false
+		return resolvedCollision{}, err
 	}
-	state = resolvedCollision{destinationInfo: info, originalHash: hashBytes(original), originalMode: mode, backup: managedBackup(paths, action.Kind, action.Target, action.Name)}
+	state := resolvedCollision{destinationInfo: info, originalHash: hashBytes(original), originalMode: mode, backup: managedBackup(paths, action.Kind, action.Target, action.Name)}
 	if !safeBackupParent(paths, filepath.Dir(state.backup)) {
-		return resolvedCollision{}, false
+		return resolvedCollision{}, errUnsafeBackupParent
 	}
 	if info, err := os.Lstat(state.backup); err == nil {
 		if err := validateUnreferencedBackup(state.backup); err != nil {
-			return resolvedCollision{}, false
+			return resolvedCollision{}, fmt.Errorf("existing unreferenced backup is unsafe: %w", err)
 		}
 		backupData, _, err := readSafeFile(state.backup, "unreferenced instruction backup")
 		if err != nil {
-			return resolvedCollision{}, false
+			return resolvedCollision{}, err
 		}
 		hash := hashBytes(backupData)
 		if hash != state.originalHash {
-			return resolvedCollision{}, false
+			return resolvedCollision{}, fmt.Errorf("an unreferenced backup with different content exists at %s", state.backup)
 		}
 		state.backupInfo, state.backupHash = info, hash
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return resolvedCollision{}, false
+		return resolvedCollision{}, err
 	}
-	return state, true
+	return state, nil
 }
+
+var errUnsafeBackupParent = errors.New("backup directory is unsafe")
 
 // resolvableSkillCollision accepts an existing unowned skill directory or link
 // that can be renamed into a private backup on the same filesystem.
-func resolvableSkillCollision(paths Paths, loaded LoadedManifest, action Action) (resolvedCollision, bool) {
+func resolvableSkillCollision(paths Paths, loaded LoadedManifest, action Action) (resolvedCollision, error) {
 	if action.Action != "blocked_collision" {
-		return resolvedCollision{}, false
+		return resolvedCollision{}, fmt.Errorf("not a skill collision")
 	}
-	if source, desired := loaded.Sources[action.Skill]; !desired || source != action.Source || validateTrustedSource(loaded.Repository, source) != nil {
-		return resolvedCollision{}, false
+	if source, desired := loaded.Sources[action.Skill]; !desired || source != action.Source {
+		return resolvedCollision{}, fmt.Errorf("catalog source changed")
+	} else if err := validateTrustedSource(loaded.Repository, source); err != nil {
+		return resolvedCollision{}, err
 	}
-	if validateTargetRoot(filepath.Dir(action.Destination)) != nil {
-		return resolvedCollision{}, false
+	if err := validateTargetRoot(filepath.Dir(action.Destination)); err != nil {
+		return resolvedCollision{}, err
 	}
 	info, err := os.Lstat(action.Destination)
-	if err != nil || (!info.IsDir() && info.Mode()&os.ModeSymlink == 0) {
-		return resolvedCollision{}, false
+	if err != nil {
+		return resolvedCollision{}, err
+	}
+	if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return resolvedCollision{}, fmt.Errorf("destination is not a directory or symlink")
 	}
 	backup := filepath.Join(paths.BackupDir, "skill", action.Target, action.Skill, "original")
 	if !safeBackupParent(paths, filepath.Dir(backup)) {
-		return resolvedCollision{}, false
+		return resolvedCollision{}, errUnsafeBackupParent
 	}
 	if _, err := os.Lstat(backup); !errors.Is(err, os.ErrNotExist) {
-		return resolvedCollision{}, false
+		return resolvedCollision{}, fmt.Errorf("a skill backup already exists at %s", backup)
 	}
 	ancestor := filepath.Dir(backup)
 	for {
 		ancestorInfo, err := os.Lstat(ancestor)
 		if err == nil {
 			if !sameDevice(info, ancestorInfo) {
-				return resolvedCollision{}, false
+				return resolvedCollision{}, fmt.Errorf("the backup directory is on another filesystem")
 			}
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) {
-			return resolvedCollision{}, false
+			return resolvedCollision{}, err
 		}
 		ancestor = filepath.Dir(ancestor)
 	}
-	return resolvedCollision{destinationInfo: info, backup: backup}, true
+	return resolvedCollision{destinationInfo: info, backup: backup}, nil
 }
 
 // resolvableJSONKeyCollision accepts a key holding a different, valid value in
 // a readable settings file and remembers that value for restoration.
-func resolvableJSONKeyCollision(loaded LoadedManifest, action Action) (resolvedCollision, bool) {
+func resolvableJSONKeyCollision(paths Paths, loaded LoadedManifest, action Action) (resolvedCollision, error) {
 	value, desired := loaded.JSONKeyValues[action.Target][action.Name]
 	if action.Action != "blocked_collision" || !desired || loaded.JSONKeySources[action.Target] != action.Source {
-		return resolvedCollision{}, false
+		return resolvedCollision{}, fmt.Errorf("catalog value changed")
 	}
-	file := inspectJSONSettings(action.Destination)
+	file := inspectJSONSettings(paths, action.Destination)
 	current, present := file.values[action.Name]
-	if file.blocked != "" || !present || bytes.Equal(current, value) {
-		return resolvedCollision{}, false
+	switch {
+	case file.blocked != "":
+		return resolvedCollision{}, errors.New(file.blocked)
+	case !present:
+		return resolvedCollision{}, fmt.Errorf("key is not present")
+	case bytes.Equal(current, value):
+		return resolvedCollision{}, fmt.Errorf("key already has the catalog value")
 	}
-	return resolvedCollision{originalValue: current, fileHash: file.hash}, true
+	return resolvedCollision{originalValue: current, fileHash: file.hash}, nil
 }
 
 func safeBackupParent(paths Paths, parent string) bool {
@@ -1311,7 +1435,8 @@ func safeBackupParent(paths Paths, parent string) bool {
 }
 
 func preflightResolvedCollision(paths Paths, loaded LoadedManifest, action Action, expected resolvedCollision) error {
-	fresh, eligible := resolvableCollision(paths, loaded, Action{ID: action.ID, Kind: action.Kind, Action: "blocked_collision", Skill: action.Skill, Target: action.Target, Name: action.Name, Source: action.Source, Destination: action.Destination})
+	fresh, ineligible := resolvableCollision(paths, loaded, Action{ID: action.ID, Kind: action.Kind, Action: "blocked_collision", Skill: action.Skill, Target: action.Target, Name: action.Name, Source: action.Source, Destination: action.Destination})
+	eligible := ineligible == nil
 	if action.Kind == "skill" {
 		if !eligible || !os.SameFile(fresh.destinationInfo, expected.destinationInfo) {
 			return fmt.Errorf("skill collision changed during apply")
@@ -1868,6 +1993,10 @@ func atomicInstructionFile(destination string, data []byte, mode os.FileMode, re
 	return mutation, nil
 }
 
+// errReplacementTargetChanged reports that the quarantined destination was not
+// the verified file; conditionalInstructionReplace then puts it back.
+var errReplacementTargetChanged = errors.New("managed-file collision changed before replacement")
+
 func conditionalInstructionReplace(action Action, data []byte, mode os.FileMode, expectedInfo os.FileInfo, expectedHash string, expectedMode os.FileMode, runReplacementHooks bool) (instructionFileMutation, error) {
 	var mutation instructionFileMutation
 	destination := action.Destination
@@ -1906,7 +2035,7 @@ func conditionalInstructionReplace(action Action, data []byte, mode os.FileMode,
 	}
 	displacedInfo, err := os.Lstat(quarantine)
 	if err != nil || !os.SameFile(displacedInfo, expectedInfo) || hashBytes(displaced) != expectedHash || displacedMode != expectedMode {
-		return mutation, errors.Join(fmt.Errorf("managed-file collision changed before replacement"), restoreDisplacedNoReplace(destination, quarantine))
+		return mutation, errors.Join(errReplacementTargetChanged, restoreDisplacedNoReplace(destination, quarantine))
 	}
 	if runReplacementHooks && beforeReplacementInstall != nil {
 		if err := beforeReplacementInstall(action); err != nil {

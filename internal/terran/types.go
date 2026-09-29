@@ -142,6 +142,9 @@ type PlanResult struct {
 	// of the whole settings file ("" when missing); apply refuses to write
 	// if the file no longer matches.
 	jsonFiles map[string]string
+	// collisions maps each blocked_collision item id to a hash of the content
+	// at its destination, so the digest changes when that content does.
+	collisions map[string]string
 }
 
 type CollisionDecision string

@@ -692,6 +692,79 @@ func TestDecideReplaceBacksUpAndInstallsCatalogVersion(t *testing.T) {
 	})
 }
 
+func TestDecideReplaceSkillRollsBackWhenLaterStepFails(t *testing.T) {
+	_, repo := testEnvironment(t)
+	paths, _ := ResolvePaths()
+	destination, _ := skillDestination(paths, "agents", "example")
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "mine.txt"), []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	beforeReceiptWrite = func() error { return errors.New("injected receipt failure") }
+	t.Cleanup(func() { beforeReceiptWrite = nil })
+	if _, err := ApplyWithOptions("agents", "test", ApplyOptions{Decisions: map[string]CollisionDecision{"skill/agents/example": CollisionReplace}}); err == nil {
+		t.Fatal("injected failure ignored")
+	}
+	if info, err := os.Lstat(destination); err != nil || !info.IsDir() {
+		t.Fatalf("original skill directory not renamed back: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(destination, "mine.txt")); string(got) != "mine" {
+		t.Fatalf("original skill content: %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(paths.BackupDir, "skill", "agents", "example", "original")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("backup left behind: %v", err)
+	}
+}
+
+func TestDecideReplaceIneligibleSkillExplainsWhy(t *testing.T) {
+	_, repo := testEnvironment(t)
+	paths, _ := ResolvePaths()
+	destination, _ := skillDestination(paths, "agents", "example")
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("not a skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyWithOptions("agents", "test", ApplyOptions{Decisions: map[string]CollisionDecision{"skill/agents/example": CollisionReplace}})
+	if action := actionByIDOrFail(t, result, "skill/agents/example"); err != nil || action.Action != "blocked_collision" || action.Reason != "replace not possible: destination is not a directory or symlink" {
+		t.Fatalf("apply: %#v %v", action, err)
+	}
+}
+
+func TestPlanDigestBindsCollidingContent(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global")
+	prepareInstructionParents(t)
+	paths, _ := ResolvePaths()
+	destination, _ := instructionDestination(paths, "claude-global")
+	if err := os.WriteFile(destination, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	reviewed := mustPlan(t, "all")
+	edited := []byte("mine, edited after review\n")
+	if err := os.WriteFile(destination, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ApplyWithOptions("all", "test", ApplyOptions{ExpectDigest: reviewed.Digest, Decisions: map[string]CollisionDecision{"instruction/claude-global": CollisionReplace}})
+	if !hasCode(err, CodePlanChanged) {
+		t.Fatalf("changed collision content applied against the reviewed digest: %v", err)
+	}
+	if got, _ := os.ReadFile(destination); !bytes.Equal(got, edited) {
+		t.Fatalf("destination replaced: %q", got)
+	}
+}
+
 func TestDecideKeepHoldsWithoutTouchingDestination(t *testing.T) {
 	_, repo := instructionEnvironment(t, "claude-global", "opencode-global")
 	prepareInstructionParents(t)

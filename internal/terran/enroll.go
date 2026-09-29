@@ -93,6 +93,12 @@ func holdLocked(paths Paths, enrollment Enrollment, id string, hold bool) (Enrol
 	} else {
 		result.Holds = append(append([]string(nil), enrollment.Holds[:index]...), enrollment.Holds[index+1:]...)
 	}
+	return writeEnrollment(paths, result)
+}
+
+// writeEnrollment rewrites the enrollment config, typically with changed
+// holds; the caller holds the Terran lock and has validated every hold id.
+func writeEnrollment(paths Paths, result Enrollment) (Enrollment, error) {
 	if len(result.Holds) == 0 {
 		result.Holds = nil
 	}

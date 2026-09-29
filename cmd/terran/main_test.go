@@ -99,6 +99,7 @@ func TestFleetTableRendersMixedRows(t *testing.T) {
 		{Name: "cc3", Platform: "linux", Error: "offline"},
 		{Name: "cc4", Platform: "linux", Reachable: true, TerranVersion: "0.4.0", Blocked: 1, Drifted: 1},
 		{Name: "cc5", Platform: "linux", Reachable: true, TerranVersion: "0.4.0", Clean: true},
+		{Name: "cc6", Platform: "linux", Reachable: true, TerranVersion: "0.4.0", Clean: true, Healthy: true, ToolsMissing: 2},
 	}
 	var out bytes.Buffer
 	if err := writeFleetTable(&out, rows); err != nil {
@@ -109,7 +110,8 @@ func TestFleetTableRendersMixedRows(t *testing.T) {
 		"cc2   linux     0.4.0   5aeb5d4  1c2d3e4  drift: 2\n" +
 		"cc3   linux     -       -        -        offline\n" +
 		"cc4   linux     0.4.0   -        -        blocked: 1\n" +
-		"cc5   linux     0.4.0   -        -        unhealthy\n"
+		"cc5   linux     0.4.0   -        -        unhealthy\n" +
+		"cc6   linux     0.4.0   -        -        clean, 2 tools missing\n"
 	if out.String() != want {
 		t.Fatalf("table:\n%s\nwant:\n%s", out.String(), want)
 	}
@@ -391,7 +393,8 @@ func assertJSONError(t *testing.T, data []byte, code, message, next string) {
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		t.Fatalf("trailing JSON in %q: %v", data, err)
 	}
-	if result.SchemaVersion != terran.SchemaVersion || result.Error.Code != code || result.Error.Message != message || result.Error.Next != next {
+	// Operational messages are "<context>: <error text>"; usage messages are exact.
+	if result.SchemaVersion != terran.SchemaVersion || result.Error.Code != code || (result.Error.Message != message && !strings.HasPrefix(result.Error.Message, message+": ")) || result.Error.Next != next {
 		t.Fatalf("unexpected JSON error: %#v", result)
 	}
 }
@@ -518,6 +521,9 @@ func TestCLIApplyDecideAndExpect(t *testing.T) {
 		t.Fatalf("stale digest code=%d stdout=%q", code, stdout.String())
 	}
 	assertJSONError(t, stdout.Bytes(), terran.CodePlanChanged, "apply failed", "run terran plan --json again and review")
+	if !strings.Contains(stdout.String(), `"message":"apply failed: plan digest `) || !strings.Contains(stdout.String(), "does not match the expected digest") {
+		t.Fatalf("JSON error message lacks the error text: %q", stdout.String())
+	}
 	if got, _ := os.ReadFile(destination); !bytes.Equal(got, original) {
 		t.Fatal("stale digest changed the destination")
 	}
