@@ -22,6 +22,7 @@ Added:
 - `terran capture` to list unmanaged agent setup on this machine without printing values.
 - Fleet status: `command-centers.json` in the overlay, `terran status` (table or JSON), `terran status NAME` (read-only remote item status), `terran status --local`, and `terran status --summary`, using a fixed `ssh` command. Summaries report `tools_missing`, shown as `, N tools missing` without marking the machine unhealthy; a remote JSON error shows as `<code>: <message>`.
 - New skill `terran-provision` (fresh and existing machines, macOS and Omarchy references). Rewritten `terran-curate-skills`, `terran-diagnose`, and `terran-update` for the agent-first workflow.
+- New skill `terran-fleet`: an agent updates, diagnoses, and fixes other Command Centers over SSH with the same plan, approval, and `--expect` loop, never pushing to git. There are no `terran cc` wrapper commands in 0.4.
 - Agent-first README and documentation site; expanded `SECURITY.md`.
 
 ## 0.3.0 - 2026-09-22

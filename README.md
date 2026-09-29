@@ -72,6 +72,7 @@ Agent skills in this catalog carry the detailed workflows:
 - `terran-curate-skills`: add, adapt, remove, or audit catalog items.
 - `terran-diagnose`: explain and fix failures.
 - `terran-update`: update the binary or catalogs.
+- `terran-fleet`: update, diagnose, or fix other Command Centers over SSH.
 
 ## Request to skill to commands
 
@@ -83,9 +84,25 @@ Agent skills in this catalog carry the detailed workflows:
 | "Status of all machines" | `terran-diagnose` | `terran status`, `terran status <name>` |
 | "Add this skill (or setting) to the catalog" | `terran-curate-skills` | `terran capture --json`, edit `terran.json`, `terran plan --json`, `terran apply --expect D` |
 | "Update Terran" | `terran-update` | `terran version --json`, `terran status`, `terran plan --json`, `terran apply --expect D` |
+| "Update cc2 with what I added on cc1" | `terran-fleet` | `git status`/`rev-parse` here, then over SSH: `git fetch`, `git merge --ff-only COMMIT`, `terran plan --json`, `terran apply --expect D`, `terran doctor --json` |
+| "Is cc3 behind?" / "Fix cc2" | `terran-fleet` | `terran status --json`, `terran status cc2 --json`, then over SSH: `terran doctor --json`, `terran plan --json`, `terran capture --json` |
 
 Command Center names are a convention the user chooses (for example `cc1`,
 `cc2`); Terran requires only a unique display name.
+
+### Operating other Command Centers
+
+Terran never pushes, fetches a catalog, or writes to another machine itself.
+To update or repair a remote Command Center, the agent on your current machine
+uses the `terran-fleet` skill: it checks the target with `terran status`, asks
+you to push the catalog and overlay, fast-forwards the target's checkouts to
+exactly the commits you pushed (`git fetch` then `git merge --ff-only`, refusing
+a dirty or diverged checkout), then runs `terran plan --json` and, after your
+approval, `terran apply --expect <digest>` on the target. Each remote command is
+one non-interactive `ssh -o BatchMode=yes <alias> ...` call with a fixed
+argument vector, shown to you before it runs. Collisions still need your
+per-item choice, and drift still blocks until you decide. The `terran cc`
+wrapper commands are not part of 0.4.
 
 ## Command reference
 

@@ -39,6 +39,11 @@
       "targets": ["agents", "claude"]
     },
     {
+      "skill": "terran-fleet",
+      "source": "skills/terran-fleet",
+      "targets": ["agents", "claude"]
+    },
+    {
       "skill": "terran-provision",
       "source": "skills/terran-provision",
       "targets": ["agents", "claude"]
