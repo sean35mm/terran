@@ -18,10 +18,13 @@ var beforeEnrollmentConfigWrite func() error
 func LoadEnrollment(paths Paths) (Enrollment, error) {
 	var enrollment Enrollment
 	if err := readTrustedStateStrict(paths.ConfigFile, "enrollment config", &enrollment, 1<<20); err != nil {
-		return Enrollment{}, err
+		if errors.Is(err, os.ErrNotExist) {
+			return Enrollment{}, Coded(CodeNotEnrolled, nextEnroll, err)
+		}
+		return Enrollment{}, Coded(CodeUnsafeState, nextState, err)
 	}
 	if enrollment.SchemaVersion != SchemaVersion || enrollment.RepositoryID == "" || enrollment.RepositoryPath == "" || enrollment.CommandCenterID == "" || enrollment.DisplayName == "" {
-		return Enrollment{}, fmt.Errorf("invalid enrollment config")
+		return Enrollment{}, Coded(CodeUnsafeState, nextState, fmt.Errorf("invalid enrollment config"))
 	}
 	return enrollment, nil
 }

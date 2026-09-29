@@ -87,6 +87,70 @@ func TestManifestRejectsTrailingJSONDuplicatePairsAndOversize(t *testing.T) {
 	}
 }
 
+func TestErrorCodeClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T) error
+		code string
+		next string
+	}{
+		{
+			name: "no enrollment",
+			run: func(t *testing.T) error {
+				_, _ = testEnvironment(t)
+				_, err := Plan("all")
+				return err
+			},
+			code: CodeNotEnrolled,
+			next: nextEnroll,
+		},
+		{
+			name: "invalid manifest",
+			run: func(t *testing.T) error {
+				_, repo := testEnvironment(t)
+				if err := os.WriteFile(filepath.Join(repo, "terran.json"), []byte(`{"schema_version":1,"id":"test-catalog","version":"0.1.0","projections":[],"extra":true}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				_, err := LoadManifest(repo)
+				return err
+			},
+			code: CodeManifestInvalid,
+			next: nextManifest,
+		},
+		{
+			name: "tampered receipt",
+			run: func(t *testing.T) error {
+				_, repo := testEnvironment(t)
+				if _, _, err := Enroll(repo, "test", false); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := Apply("all", "test"); err != nil {
+					t.Fatal(err)
+				}
+				paths, err := ResolvePaths()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(paths.Receipt, []byte(`{}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				_, err = Plan("all")
+				return err
+			},
+			code: CodeReceiptInvalid,
+			next: nextState,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run(t)
+			if got, next := ErrorCode(err); got != tc.code || next != tc.next {
+				t.Fatalf("ErrorCode()=(%q, %q), want (%q, %q); err=%v", got, next, tc.code, tc.next, err)
+			}
+		})
+	}
+}
+
 func TestManifestRejectsMismatchAndEscapingSymlink(t *testing.T) {
 	_, repo := testEnvironment(t)
 	md := filepath.Join(repo, "skills", "example", "SKILL.md")

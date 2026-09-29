@@ -29,7 +29,12 @@ type LoadedManifest struct {
 	ConfigHashes       map[string]string
 }
 
-func LoadManifest(repo string) (LoadedManifest, error) {
+func LoadManifest(repo string) (loaded LoadedManifest, err error) {
+	defer func() {
+		if err != nil {
+			err = Coded(CodeManifestInvalid, nextManifest, err)
+		}
+	}()
 	if !filepath.IsAbs(repo) {
 		return LoadedManifest{}, fmt.Errorf("repository path must be absolute")
 	}

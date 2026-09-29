@@ -27,26 +27,15 @@ type versionInfo struct {
 
 func main() {
 	args := os.Args[1:]
-	interactive := terminalFile(os.Stdin) && terminalFile(os.Stderr)
-	if len(args) == 0 {
-		interactive = guidedTerminalStreams(os.Stdin, os.Stdout, os.Stderr, terminalFile)
-	}
-	os.Exit(runWithIO(args, os.Stdin, os.Stdout, os.Stderr, interactive))
-}
-
-func guidedTerminalStreams(stdin, stdout, stderr *os.File, isTerminal func(*os.File) bool) bool {
-	return isTerminal(stdin) && isTerminal(stdout) && isTerminal(stderr)
+	os.Exit(runWithIO(args, os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	return runWithIO(args, strings.NewReader(""), stdout, stderr, false)
+	return runWithIO(args, stdout, stderr)
 }
 
-func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer, interactive bool) int {
+func runWithIO(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		if interactive {
-			return runWizard(newPromptReader(stdin), stdout, stderr)
-		}
 		printHelp(stdout)
 		return 0
 	}
@@ -56,7 +45,7 @@ func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer, interac
 	}
 	if args[0] == "--version" {
 		if len(args) != 1 {
-			return usage(stderr, "--version takes no arguments")
+			return usage(stdout, stderr, "--version takes no arguments", jsonRequested(args[1:]))
 		}
 		fmt.Fprintln(stdout, version)
 		return 0
@@ -71,7 +60,7 @@ func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer, interac
 			printCommandHelp(stdout, args[1])
 			return 0
 		}
-		return usage(stderr, "unknown help topic")
+		return usage(stdout, stderr, "unknown help topic", jsonRequested(args[1:]))
 	case "version":
 		if commandHelpRequested(args[1:]) {
 			printCommandHelp(stdout, "version")
@@ -79,7 +68,7 @@ func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer, interac
 		}
 		fs, options := newFlags("version", stderr)
 		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
-			return flagError(stderr, err)
+			return flagError(stdout, stderr, err, jsonRequested(args[1:]))
 		}
 		if options.json {
 			if err := writeJSON(stdout, versionInfo{terran.SchemaVersion, version, commit, date}); err != nil {
@@ -96,12 +85,12 @@ func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer, interac
 		}
 		fs, options := newFlags("enroll", stderr)
 		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || options.repo == "" {
-			return flagError(stderr, err)
+			return flagError(stdout, stderr, err, jsonRequested(args[1:]))
 		}
 		enrollment, changed, err := terran.Enroll(options.repo, options.name, options.replace)
 		if err != nil {
 			if options.json {
-				return jsonOperational(stdout, stderr, "enroll_failed", "enrollment failed", err)
+				return jsonOperational(stdout, stderr, "enrollment failed", err)
 			}
 			return operational(stderr, err)
 		}
@@ -120,7 +109,7 @@ func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer, interac
 		}
 		return 0
 	case "plan", "apply", "status":
-		return runProjectionCommand(args[0], args[1:], stdin, stdout, stderr, interactive)
+		return runProjectionCommand(args[0], args[1:], stdout, stderr)
 	case "doctor":
 		if commandHelpRequested(args[1:]) {
 			printCommandHelp(stdout, "doctor")
@@ -128,7 +117,7 @@ func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer, interac
 		}
 		fs, options := newFlags("doctor", stderr)
 		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
-			return flagError(stderr, err)
+			return flagError(stdout, stderr, err, jsonRequested(args[1:]))
 		}
 		result := terran.Doctor(version)
 		if options.json {
@@ -145,27 +134,27 @@ func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer, interac
 		}
 		return 0
 	default:
-		return usage(stderr, "unknown command "+args[0])
+		return usage(stdout, stderr, "unknown command "+args[0], jsonRequested(args[1:]))
 	}
 }
 
-func runProjectionCommand(command string, args []string, stdin io.Reader, stdout, stderr io.Writer, interactive bool) int {
+func runProjectionCommand(command string, args []string, stdout, stderr io.Writer) int {
 	if commandHelpRequested(args) {
 		printCommandHelp(stdout, command)
 		return 0
 	}
 	fs, options := newFlags(command, stderr)
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
-		return flagError(stderr, err)
+		return flagError(stdout, stderr, err, jsonRequested(args))
 	}
 	if options.target != "all" && options.target != "agents" && options.target != "claude" && options.target != "opencode" {
-		return usage(stderr, "target must be all, agents, claude, or opencode")
+		return usage(stdout, stderr, "target must be all, agents, claude, or opencode", options.json)
 	}
 	if command == "status" {
 		result, err := terran.Status(options.target)
 		if err != nil {
 			if options.json {
-				return jsonOperational(stdout, stderr, "status_failed", "status failed", err)
+				return jsonOperational(stdout, stderr, "status failed", err)
 			}
 			return operational(stderr, err)
 		}
@@ -190,17 +179,13 @@ func runProjectionCommand(command string, args []string, stdin io.Reader, stdout
 	var result terran.PlanResult
 	var err error
 	if command == "apply" {
-		if interactive && !options.json {
-			result, err = terran.ApplyWithOptions(options.target, version, terran.ApplyOptions{ResolveCollision: promptCollisionResolver(newPromptReader(stdin), stderr)})
-		} else {
-			result, err = terran.Apply(options.target, version)
-		}
+		result, err = terran.Apply(options.target, version)
 	} else {
 		result, err = terran.Plan(options.target)
 	}
 	if err != nil {
 		if options.json {
-			return jsonOperational(stdout, stderr, command+"_failed", command+" failed", err)
+			return jsonOperational(stdout, stderr, command+" failed", err)
 		}
 		return operational(stderr, err)
 	}
@@ -227,35 +212,6 @@ func runProjectionCommand(command string, args []string, stdin io.Reader, stdout
 		}
 	}
 	return 0
-}
-
-func promptCollisionResolver(reader *promptReader, stderr io.Writer) func(terran.Action) (terran.CollisionDecision, error) {
-	return func(action terran.Action) (terran.CollisionDecision, error) {
-		for {
-			if _, err := fmt.Fprintf(stderr, "Existing %s %s differs. [r] Replace, [k] Keep, [q] Quit (default): ", action.Kind, action.Target); err != nil {
-				return "", fmt.Errorf("write collision prompt: %w", err)
-			}
-			choice, ok, err := reader.read()
-			if err != nil {
-				return "", fmt.Errorf("read collision choice: %w", err)
-			}
-			if !ok {
-				return terran.CollisionAbort, nil
-			}
-			switch strings.ToLower(strings.TrimSpace(choice)) {
-			case "r", "replace":
-				return terran.CollisionReplace, nil
-			case "k", "keep":
-				return terran.CollisionSkip, nil
-			case "", "q", "quit":
-				return terran.CollisionAbort, nil
-			default:
-				if _, err := fmt.Fprintln(stderr, "Please enter r, k, or q."); err != nil {
-					return "", fmt.Errorf("write invalid collision choice: %w", err)
-				}
-			}
-		}
-	}
 }
 
 type commandOptions struct {
@@ -286,13 +242,15 @@ func newFlags(name string, output io.Writer) (*flag.FlagSet, *commandOptions) {
 	return fs, options
 }
 
-func flagError(stderr io.Writer, err error) int {
-	if err == nil {
-		fmt.Fprintln(stderr, "invalid arguments")
-	} else if !errors.Is(err, flag.ErrHelp) {
-		fmt.Fprintln(stderr, err)
+func flagError(stdout, stderr io.Writer, err error, jsonOutput bool) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return 2
 	}
-	return 2
+	message := "invalid arguments"
+	if err != nil {
+		message = err.Error()
+	}
+	return usage(stdout, stderr, message, jsonOutput)
 }
 
 func commandHelpRequested(args []string) bool {
@@ -304,23 +262,54 @@ type errorOutput struct {
 	Error         struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
+		Next    string `json:"next,omitempty"`
 	} `json:"error"`
 }
 
-func jsonOperational(stdout, stderr io.Writer, code, message string, err error) int {
-	result := errorOutput{SchemaVersion: terran.SchemaVersion}
-	result.Error.Code = code
-	result.Error.Message = message
-	if writeErr := writeJSON(stdout, result); writeErr != nil {
-		fmt.Fprintln(stderr, "terran: write JSON error:", writeErr)
-	}
-	fmt.Fprintln(stderr, "terran:", err)
+func jsonOperational(stdout, stderr io.Writer, message string, err error) int {
+	writeJSONError(stdout, stderr, message, err)
 	return 1
 }
 
-func operational(stderr io.Writer, err error) int { fmt.Fprintln(stderr, "terran:", err); return 1 }
-func usage(stderr io.Writer, message string) int  { fmt.Fprintln(stderr, "terran:", message); return 2 }
-func writeJSON(w io.Writer, value any) error      { return json.NewEncoder(w).Encode(value) }
+func writeJSONError(stdout, stderr io.Writer, message string, err error) {
+	code, next := terran.ErrorCode(err)
+	result := errorOutput{SchemaVersion: terran.SchemaVersion}
+	result.Error.Code = code
+	result.Error.Message = message
+	result.Error.Next = next
+	if writeErr := writeJSON(stdout, result); writeErr != nil {
+		fmt.Fprintln(stderr, "terran: write JSON error:", writeErr)
+	}
+	printError(stderr, err)
+}
+
+func operational(stderr io.Writer, err error) int { printError(stderr, err); return 1 }
+func usage(stdout, stderr io.Writer, message string, jsonOutput bool) int {
+	err := terran.Coded(terran.CodeUsage, "", errors.New(message))
+	if jsonOutput {
+		writeJSONError(stdout, stderr, message, err)
+		return 2
+	}
+	printError(stderr, err)
+	return 2
+}
+func writeJSON(w io.Writer, value any) error { return json.NewEncoder(w).Encode(value) }
+
+func jsonRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json" {
+			return true
+		}
+	}
+	return false
+}
+
+func printError(stderr io.Writer, err error) {
+	fmt.Fprintln(stderr, "terran:", err)
+	if _, next := terran.ErrorCode(err); next != "" {
+		fmt.Fprintln(stderr, "next:", next)
+	}
+}
 
 func knownCommand(command string) bool {
 	switch command {
@@ -334,7 +323,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, `Terran manages local skills, global instructions, and fixed global configs on a Command Center.
 
 Start here:
-  terran                  Guide enrollment, review changes, and confirm apply
+  terran                  Show this help
   terran doctor           Diagnose enrollment and managed state
   terran help             Show this help or help for one command
 
@@ -345,8 +334,8 @@ Advanced and automation:
   terran status           Inspect low-level managed state
   terran version          Print build metadata
 
-Run terran help COMMAND for flags and exit codes. Advanced commands support
-stable --json output where documented and never launch the guided workflow.`)
+Run terran help COMMAND for flags and exit codes. Commands support stable
+--json output where documented.`)
 }
 
 func printCommandHelp(w io.Writer, command string) {
@@ -359,7 +348,7 @@ func printCommandIntro(w io.Writer, command string) {
 		"version": "Usage: terran version [--json]\nRead-only. Prints build metadata. Exit: 0 success, 1 output failure, 2 usage.\n\nFlags:",
 		"enroll":  "Usage: terran enroll --repo PATH [--name NAME] [--replace] [--json]\nMutates private enrollment state; it never creates skill links, instruction files, or config files. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
 		"plan":    "Usage: terran plan [--target all|claude|agents|opencode] [--json]\nRead-only. Reports every proposed source, destination, action, and reason. Exit: 0 unblocked, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
-		"apply":   "Usage: terran apply [--target all|claude|agents|opencode] [--json]\nMutates only validated skill leaves, fixed instruction/config files, and the receipt after an all-actions preflight. On a human terminal only, safe differing unowned instruction/config files may be replaced with a private backup, kept, or quit before mutation. Exit: 0 applied, 1 quit or operational failure, 2 usage, 3 blocked.\n\nFlags:",
+		"apply":   "Usage: terran apply [--target all|claude|agents|opencode] [--json]\nMutates only validated skill leaves, fixed instruction/config files, and the receipt after an all-actions preflight. Exit: 0 applied, 1 operational failure, 2 usage, 3 blocked.\n\nFlags:",
 		"status":  "Usage: terran status [--target all|claude|agents|opencode] [--json]\nRead-only. Exit: 0 clean, 1 non-clean or operational failure, 2 usage.\n\nFlags:",
 		"doctor":  "Usage: terran doctor [--json]\nRead-only diagnostics. Exit: 0 healthy, 1 unhealthy or output failure, 2 usage.\n\nFlags:",
 	}

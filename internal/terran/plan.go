@@ -33,8 +33,12 @@ func selectedConfig(filter, target string) bool {
 	return filter == "all" || (filter == "opencode" && (target == "opencode-config" || target == "naru-runtime"))
 }
 
-func LoadReceipt(paths Paths) (Receipt, error) {
-	var receipt Receipt
+func LoadReceipt(paths Paths) (receipt Receipt, err error) {
+	defer func() {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			err = Coded(CodeReceiptInvalid, nextState, err)
+		}
+	}()
 	if err := readTrustedStateStrict(paths.Receipt, "receipt", &receipt, 4<<20); err != nil {
 		return Receipt{}, err
 	}
@@ -145,7 +149,7 @@ func Plan(target string) (PlanResult, error) {
 		return PlanResult{}, err
 	}
 	if loaded.Manifest.ID != enrollment.RepositoryID {
-		return PlanResult{}, fmt.Errorf("enrolled repository id changed")
+		return PlanResult{}, Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("enrolled repository id changed"))
 	}
 	receipt, err := LoadReceipt(paths)
 	if errors.Is(err, os.ErrNotExist) {
@@ -153,7 +157,7 @@ func Plan(target string) (PlanResult, error) {
 	} else if err != nil {
 		return PlanResult{}, fmt.Errorf("load receipt: %w", err)
 	} else if receipt.RepositoryID != enrollment.RepositoryID || receipt.RepositoryPath != loaded.Repository {
-		return PlanResult{}, fmt.Errorf("receipt repository differs from enrollment")
+		return PlanResult{}, Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("receipt repository differs from enrollment"))
 	}
 	return makePlan(paths, loaded, receipt, target)
 }
@@ -507,7 +511,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 			return err
 		}
 		if loaded.Manifest.ID != enrollment.RepositoryID {
-			return fmt.Errorf("enrolled repository id changed")
+			return Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("enrolled repository id changed"))
 		}
 		receipt, err := LoadReceipt(paths)
 		if errors.Is(err, os.ErrNotExist) {
@@ -515,7 +519,7 @@ func ApplyWithOptions(target, buildVersion string, options ApplyOptions) (PlanRe
 		} else if err != nil {
 			return err
 		} else if receipt.RepositoryID != enrollment.RepositoryID || receipt.RepositoryPath != loaded.Repository {
-			return fmt.Errorf("receipt repository differs from enrollment")
+			return Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("receipt repository differs from enrollment"))
 		}
 		result, err = makePlan(paths, loaded, receipt, target)
 		if err != nil {
@@ -816,7 +820,7 @@ func CanResolveCollision(action Action) (bool, error) {
 		return false, err
 	}
 	if loaded.Manifest.ID != enrollment.RepositoryID {
-		return false, fmt.Errorf("enrolled repository id changed")
+		return false, Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("enrolled repository id changed"))
 	}
 	_, eligible := resolvableCollision(paths, loaded, action)
 	return eligible, nil

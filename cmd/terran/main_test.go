@@ -17,39 +17,6 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("writer failed") }
 
-type failOnWriteWriter struct {
-	writes int
-	failAt int
-}
-
-func (w *failOnWriteWriter) Write(data []byte) (int, error) {
-	w.writes++
-	if w.writes == w.failAt {
-		return 0, errors.New("writer failed")
-	}
-	return len(data), nil
-}
-
-func TestGuidedModeRequiresAllTerminalStreams(t *testing.T) {
-	terminal := map[*os.File]bool{os.Stdin: true, os.Stdout: false, os.Stderr: true}
-	isTerminal := func(file *os.File) bool { return terminal[file] }
-	if guidedTerminalStreams(os.Stdin, os.Stdout, os.Stderr, isTerminal) {
-		t.Fatal("redirected stdout enabled guided prompting")
-	}
-	var stdout, stderr bytes.Buffer
-	if code := runWithIO(nil, strings.NewReader("y\n"), &stdout, &stderr, guidedTerminalStreams(os.Stdin, os.Stdout, os.Stderr, isTerminal)); code != 0 {
-		t.Fatalf("help-only code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "Start here:") || stderr.Len() != 0 {
-		t.Fatalf("redirected stdout was not help-only: stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
-
-	terminal[os.Stdout] = true
-	if !guidedTerminalStreams(os.Stdin, os.Stdout, os.Stderr, isTerminal) {
-		t.Fatal("three terminal streams did not enable guided mode")
-	}
-}
-
 func TestHelpVersionJSONAndUsage(t *testing.T) {
 	oldVersion, oldCommit, oldDate := version, commit, date
 	version, commit, date = "0.1.0-test", "abc", "today"
@@ -60,6 +27,7 @@ func TestHelpVersionJSONAndUsage(t *testing.T) {
 		want string
 	}{
 		{[]string{"--help"}, 0, "Terran manages"},
+		{nil, 0, "Terran manages"},
 		{[]string{"help", "apply"}, 0, "Usage: terran apply"},
 		{[]string{"apply", "--help"}, 0, "Usage: terran apply"},
 		{[]string{"--version"}, 0, "0.1.0-test"},
@@ -84,6 +52,14 @@ func TestHelpVersionJSONAndUsage(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &value); err != nil || value["schema_version"] != float64(1) || value["version"] != "0.1.0-test" {
 		t.Fatalf("invalid JSON: %s %v", out.String(), err)
 	}
+}
+
+func TestCLIJSONUsageError(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := run([]string{"plan", "--target", "wrong", "--json"}, &out, &errOut); code != 2 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	assertJSONError(t, out.Bytes(), terran.CodeUsage, "target must be all, agents, claude, or opencode", "")
 }
 
 func TestCLIJSONWriteFailureIsNonzero(t *testing.T) {
@@ -177,7 +153,12 @@ func TestCLIJSONOperationalAndBlockedExitCodes(t *testing.T) {
 	if code := run([]string{"status", "--json"}, &out, &errOut); code != 1 {
 		t.Fatalf("operational code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
-	assertJSONError(t, out.Bytes(), "status_failed", "status failed")
+	assertJSONError(t, out.Bytes(), terran.CodeNotEnrolled, "status failed", "run terran enroll --repo <path> --name <ccN>; see README Agent guide")
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"status"}, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "next: run terran enroll --repo <path> --name <ccN>; see README Agent guide") {
+		t.Fatalf("text error next step missing: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
 	_ = os.MkdirAll(filepath.Join(repo, "skills", "example"), 0o755)
 	_ = os.WriteFile(filepath.Join(repo, "skills", "example", "SKILL.md"), []byte("---\nname: example\n---\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(repo, "terran.json"), []byte(`{"schema_version":1,"id":"test-catalog","version":"0.1.0","projections":[{"skill":"example","source":"skills/example","targets":["agents"]}]}`), 0o644)
@@ -215,7 +196,7 @@ func TestCLIJSONOperationalEnrollmentFailure(t *testing.T) {
 	if code := run([]string{"enroll", "--repo", filepath.Join(home, "missing"), "--json"}, &out, &errOut); code != 1 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
-	assertJSONError(t, out.Bytes(), "enroll_failed", "enrollment failed")
+	assertJSONError(t, out.Bytes(), terran.CodeManifestInvalid, "enrollment failed", "fix terran.json in the catalog, then run terran plan")
 	if errOut.Len() == 0 {
 		t.Fatal("operational diagnostic missing from stderr")
 	}
@@ -275,142 +256,20 @@ func TestCLIInstructionJSONHumanAndOpenCodeTarget(t *testing.T) {
 	}
 }
 
-func TestCLIInteractiveCollisionChoicesAndPromptStreams(t *testing.T) {
-	tests := []struct {
-		name          string
-		input         string
-		wantCode      int
-		wantAction    string
-		wantInvalid   bool
-		wantInstalled bool
-		wantReadError bool
-	}{
-		{name: "replace", input: "RePlAcE\n", wantCode: 0, wantAction: "replace", wantInstalled: true},
-		{name: "keep", input: "k\n", wantCode: 0, wantAction: "skip"},
-		{name: "quit", input: "q\n", wantCode: 1},
-		{name: "invalid reprompt", input: "nope\nkeep\n", wantCode: 0, wantAction: "skip", wantInvalid: true},
-		{name: "empty", input: "\n", wantCode: 1},
-		{name: "EOF", input: "", wantCode: 1},
-		{name: "overlong", input: strings.Repeat("x", promptInputLimit+1) + "\n", wantCode: 1, wantReadError: true},
+func TestCLIApplyCollisionIsBlockedWithoutPrompt(t *testing.T) {
+	destination, _, original := cliConfigCollisionEnvironment(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"apply", "--target", "opencode"}, &stdout, &stderr); code != 3 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			destination, source, original := cliConfigCollisionEnvironment(t)
-			var stdout, stderr bytes.Buffer
-			code := runWithIO([]string{"apply", "--target", "opencode"}, strings.NewReader(tc.input), &stdout, &stderr, true)
-			if code != tc.wantCode {
-				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-			}
-			if !strings.Contains(stderr.String(), "Existing config opencode-config differs") || strings.Contains(stdout.String(), "Existing config opencode-config differs") {
-				t.Fatalf("prompt stream separation failed: stdout=%q stderr=%q", stdout.String(), stderr.String())
-			}
-			if strings.Contains(stderr.String(), destination) {
-				t.Fatalf("prompt displayed private destination path: %q", stderr.String())
-			}
-			if strings.Contains(stderr.String(), string(original)) {
-				t.Fatalf("prompt displayed file contents: %q", stderr.String())
-			}
-			if tc.wantReadError != strings.Contains(stderr.String(), "read collision choice") {
-				t.Fatalf("read error=%v stderr=%q", tc.wantReadError, stderr.String())
-			}
-			if tc.wantReadError {
-				paths, err := terran.ResolvePaths()
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, path := range []string{paths.Receipt, filepath.Join(paths.BackupDir, "opencode-config", "original")} {
-					if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-						t.Fatalf("scanner error mutated %s: %v", path, err)
-					}
-				}
-			}
-			if tc.wantInvalid != strings.Contains(stderr.String(), "Please enter") {
-				t.Fatalf("invalid reprompt=%v stderr=%q", tc.wantInvalid, stderr.String())
-			}
-			if tc.wantAction != "" && !strings.Contains(stdout.String(), tc.wantAction) {
-				t.Fatalf("result missing action %q: %q", tc.wantAction, stdout.String())
-			}
-			got, err := os.ReadFile(destination)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tc.wantInstalled {
-				want, _ := os.ReadFile(source)
-				if !bytes.Equal(got, want) {
-					t.Fatal("replace did not install source")
-				}
-			} else if !bytes.Equal(got, original) {
-				t.Fatal("keep/abort changed collision")
-			}
-		})
+	if strings.Contains(stderr.String(), "Existing config opencode-config differs") {
+		t.Fatalf("unexpected prompt: %q", stderr.String())
 	}
-}
-
-func TestCLINoninteractiveAndJSONNeverPrompt(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		args        []string
-		interactive bool
-		json        bool
-	}{
-		{name: "noninteractive", args: []string{"apply", "--target", "opencode"}},
-		{name: "json", args: []string{"apply", "--target", "opencode", "--json"}, interactive: true, json: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			destination, _, original := cliConfigCollisionEnvironment(t)
-			var stdout, stderr bytes.Buffer
-			if code := runWithIO(tc.args, strings.NewReader("replace\n"), &stdout, &stderr, tc.interactive); code != 3 {
-				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-			}
-			if strings.Contains(stderr.String(), "Existing config opencode-config differs") {
-				t.Fatalf("unexpected prompt: %q", stderr.String())
-			}
-			if got, _ := os.ReadFile(destination); !bytes.Equal(got, original) {
-				t.Fatal("noninteractive apply replaced collision")
-			}
-			if tc.json {
-				var result terran.PlanResult
-				dec := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
-				if err := dec.Decode(&result); err != nil || len(result.Actions) != 1 || result.Actions[0].Action != "blocked_collision" {
-					t.Fatalf("invalid JSON result: %#v %v", result, err)
-				}
-				if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-					t.Fatalf("JSON output was not exactly one object: %v", err)
-				}
-			}
-		})
+	if got, _ := os.ReadFile(destination); !bytes.Equal(got, original) {
+		t.Fatal("apply replaced collision")
 	}
-}
-
-func TestCLIConsentOutputFailurePreventsMutation(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		input  string
-		failAt int
-	}{
-		{name: "initial prompt", input: "replace\n", failAt: 1},
-		{name: "invalid choice diagnostic", input: "invalid\nreplace\n", failAt: 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			destination, _, original := cliConfigCollisionEnvironment(t)
-			var stdout bytes.Buffer
-			stderr := &failOnWriteWriter{failAt: tc.failAt}
-			if code := runWithIO([]string{"apply", "--target", "opencode"}, strings.NewReader(tc.input), &stdout, stderr, true); code != 1 {
-				t.Fatalf("write failure exit=%d", code)
-			}
-			if got, err := os.ReadFile(destination); err != nil || !bytes.Equal(got, original) {
-				t.Fatalf("consent output failure changed destination: %q %v", got, err)
-			}
-			paths, err := terran.ResolvePaths()
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, path := range []string{paths.Receipt, filepath.Join(paths.BackupDir, "opencode-config", "original")} {
-				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("consent output failure mutated %s: %v", path, err)
-				}
-			}
-		})
+	if !strings.Contains(stdout.String(), "blocked_collision") {
+		t.Fatalf("blocked action missing: %q", stdout.String())
 	}
 }
 
@@ -447,14 +306,16 @@ func cliConfigCollisionEnvironment(t *testing.T) (destination, source string, or
 	return destination, source, original
 }
 
-func assertJSONError(t *testing.T, data []byte, code, message string) {
+func assertJSONError(t *testing.T, data []byte, code, message, next string) {
 	t.Helper()
 	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
 	var result struct {
 		SchemaVersion int `json:"schema_version"`
 		Error         struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Next    string `json:"next"`
 		} `json:"error"`
 	}
 	if err := dec.Decode(&result); err != nil {
@@ -463,7 +324,7 @@ func assertJSONError(t *testing.T, data []byte, code, message string) {
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		t.Fatalf("trailing JSON in %q: %v", data, err)
 	}
-	if result.SchemaVersion != 1 || result.Error.Code != code || result.Error.Message != message {
+	if result.SchemaVersion != 1 || result.Error.Code != code || result.Error.Message != message || result.Error.Next != next {
 		t.Fatalf("unexpected JSON error: %#v", result)
 	}
 }
