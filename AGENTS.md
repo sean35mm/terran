@@ -43,3 +43,6 @@ and build all supported Darwin/Linux amd64/arm64 targets for release-affecting
 changes. Do not commit, tag, publish, or replace release assets unless the user
 explicitly requests that delivery step. Pushing a new `terran.json` version with
 a dated `CHANGELOG.md` heading to `main` publishes a release automatically.
+`main` requires the CI checks: deliver through a pull request that merges itself
+once they pass (`gh pr create --fill`, then `gh pr merge --auto --rebase`), not
+by pushing to `main`.

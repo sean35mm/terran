@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "terran-default",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "instructions": [
     {
       "target": "claude-global",
@@ -10,6 +10,10 @@
     {
       "target": "opencode-global",
       "source": "instructions/opencode/AGENTS.md"
+    },
+    {
+      "target": "codex-global",
+      "source": "instructions/codex/AGENTS.md"
     }
   ],
   "json_keys": [

@@ -9,6 +9,8 @@ A Command Center is one machine enrolled in Terran. Terran projects the public c
 
 Command Center names are a convention the user chooses (for example `cc1`, `cc2`). Never assume a scheme; propose the next free name only when the private inventory shows one, and let the user confirm or change it.
 
+Installed skill copies lag the catalog: a machine that has not applied the new catalog still carries the old text of this skill. After fetching a catalog, read the skill from the fetched checkout (`<catalog>/skills/<name>/SKILL.md`) and follow that copy when it differs from the installed one.
+
 ## Rules
 
 - Every install command needs the user's approval before you run it. Show the exact command first. Exception: in an unattended run (the user said "don't ask", "just do it", or "set up ccN unattended"), run routine steps without stopping and report at the end; still stop for logins, secrets, deleting or overwriting user data, a collision whose versions differ, and anything outside Terran setup.

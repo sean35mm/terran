@@ -37,6 +37,8 @@ Add `--target agents|claude|opencode|codex|mise|t3` to narrow. `doctor` also rep
 
 Statuses: `ok`, `missing`, `pending`, `orphaned`, `collision`, `drift`, `held`, `excluded`. Only `held` and `excluded` do not make status non-clean.
 
+Stale records and drift: `terran forget <id>` drops Terran's record of one item (its receipt entry and hold) and leaves the destination and any backup as they are. Use it for a hold or record whose item left the catalog long ago (a deleted skill still held, a removed config still held). For drift where the user wants the catalog version, `terran forget <id>`, then `terran plan --json` shows the item as `blocked_collision`, then `terran apply --expect <digest> --decide <id>=replace` installs the catalog version with a private backup of the drifted file. Forgetting an adopted item also drops the reference to its original backup; report the backup path `forget` prints. Only with the user's choice, since it is how drift gets overwritten.
+
 Resolving a collision: `terran apply --expect <digest> --decide <id>=replace|keep` (repeatable). `replace` backs up the original privately and installs the catalog version (a skill directory or symlink is moved into Terran's private backups, replaced by a managed copy, and not restored on removal); `keep` holds the item. Only with the user's choice. A replace Terran cannot do stays `blocked_collision` with a reason starting `replace not possible:`.
 
 An `interrupted_apply` doctor warning names a leftover `.terran-tmp-*`, `.terran-old-*`, or `.terran-quarantine-*` entry; Terran never deletes it. A leftover quarantine blocks every item for its directory with `leftover Terran quarantine found at <path>`: it may hold the only copy of displaced bytes, so the user inspects and removes it, not you.
@@ -57,7 +59,7 @@ JSON errors look like `{"error":{"code":"...","message":"...","next":"..."}}`; `
 | `overlay_unavailable` | enrolled private overlay is missing, moved, or invalid | clone it back to the recorded path (shown in `next`) or re-enroll; plan fails closed so nothing is removed |
 | `plan_changed` | `--expect` digest no longer matches (including a colliding destination edited after review), or a settings file changed after planning or while apply wrote it | `terran plan --json` again, show the user, get approval again |
 | `partial_apply` | apply committed its changes and receipt, but the holds for `keep` decisions were not saved | tell the user the changes are in place; `terran hold <id>` for each kept item named in `message`, then `terran plan --json` |
-| `unknown_item` | `hold` or an item id that the plan does not contain | list ids with `terran plan --json` |
+| `unknown_item` | `hold` or `forget` with an item id that the plan, receipt, and holds do not contain | list ids with `terran plan --json` and `terran status --local --json` |
 | `unreachable` | `terran status <name>` could not reach the machine over SSH | see fleet below |
 | `usage` | bad flags, or `--decide` for an item that is not a `blocked_collision` | fix the command (exit 2) |
 | `operational` | anything else | read `message` and `next` |
