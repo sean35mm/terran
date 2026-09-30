@@ -1,6 +1,6 @@
 ---
 name: terran-curate-skills
-description: Add, adapt, remove, or audit skills and other items (files, settings keys, instructions, configs, tools) owned or projected by Terran catalogs; do not use for ordinary prompt editing or unrelated agent configuration.
+description: Add, adapt, remove, audit, or sync from this machine (for example "sync what I just added") skills and other items (files, settings keys, instructions, configs, tools) owned or projected by Terran catalogs; do not use for ordinary prompt editing or unrelated agent configuration.
 ---
 
 # Curate Terran catalogs
@@ -24,6 +24,15 @@ For each item decide:
 3. **Keep, rewrite, or drop.** Keep as is when it is precise and safe; rewrite to fix trigger scope, provenance, or portability; drop when redundant or stale. Removing an item needs the user's intent, not just missing telemetry.
 
 For every candidate review provenance and revision, license and notice duties (update `THIRD_PARTY_NOTICES.md` and keep the upstream license file with adapted skills), supported platforms, runtime dependencies, secret and network boundaries, and overlap with existing items. Prefer a small attributed adaptation to bulk-copying an upstream tree.
+
+## Sync this machine into the catalog
+
+"Sync what I just added", "cc1 is the source of truth, update the catalog". Two kinds of change flow from this machine into a catalog:
+
+1. **Edited managed items.** `terran plan --json` shows them as `blocked_drift` (this machine's copy differs from what Terran applied). For each, with the user's confirmation that this machine's version wins: copy the destination file into the catalog source (`instructions/...`, `config/...`, the skill directory, or the key's value in its `json_keys` source), check it for secrets and personal paths if the catalog is public, then re-plan: the item now plans `update` with `destination already matches catalog; record it` or `skill source changed`, and the apply only records it.
+2. **New unmanaged items.** `terran capture --json`, compare with what the user expects on every machine, and handle each new item with the decisions above (public or private, platforms, keep or drop). Items installed by their own tool (plugins, hooks, MCP servers, third-party skills) go into the overlay's `provision/checklist.md` instead of a catalog.
+
+Then `git -C <catalog> diff` for the user, commit with a conventional message, and ask the user to push the public catalog (private-overlay fleet files follow `terran-fleet`'s push rule). After the push, `terran-fleet` procedure 4 brings the other machines up to date.
 
 ## Where each item goes
 
@@ -63,6 +72,7 @@ Removing an item: delete its manifest entry and source, then plan. Expect `remov
 - "Which of the things on this machine should go into Terran?"
 - "Make this MCP-related setting part of every machine, but keep the token private."
 - "Drop the old skill and audit what the catalog still projects."
+- "Sync what I just added on this machine into the catalog."
 
 ## Should not trigger
 
