@@ -309,7 +309,7 @@ reports the matching status.
 | `noop` | `ok` | Already up to date. |
 | `create` | `missing` | The item does not exist yet; Terran will create it. |
 | `adopt` | `pending` | An identical item already exists; Terran takes ownership without changing it (files keep a private backup). |
-| `update` | `pending` | The catalog changed; Terran will copy the new version. For a skill this is also the one-time `convert live symlink to managed copy`, or `recover interrupted apply (content already matches catalog)`, which only records a copy already in place. |
+| `update` | `pending` | The catalog changed; Terran will copy the new version. For a skill this is also the one-time `convert live symlink to managed copy`, or `recover interrupted apply (content already matches catalog)`, which only records a copy already in place. For an owned file or settings key, `destination already matches catalog; record it` means the local edit was synced into the catalog (or an apply was interrupted); apply writes only the receipt. |
 | `replace` | `pending` | A collision was resolved with `replace`. Originals are backed up privately. |
 | `remove` | `orphaned` | The item left the catalog; Terran will delete what it created. |
 | `restore` | `orphaned` | The item left the catalog; Terran will put back the original it had adopted. |
@@ -403,7 +403,7 @@ owns.
 | Instruction | any file | `claude-global`: `~/.claude/CLAUDE.md`; `opencode-global`: `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/AGENTS.md`; `codex-global`: `${CODEX_HOME:-$HOME/.codex}/AGENTS.md` | whole-file copy |
 | Config | any file | `opencode-config`, `naru-runtime`: `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/{opencode,naru-runtime}.json`; `mise-config`, `mise-lock`: `${XDG_CONFIG_HOME:-$HOME/.config}/mise/{config.toml,mise.lock}` | whole-file copy |
 | File | any file | `claude-agent`: `~/.claude/agents/<name>.md`; `claude-command`: `~/.claude/commands/<name>.md`; `claude-hook`: `~/.claude/hooks/<name>` (mode 0755); `opencode-plugin`: `.../opencode/plugins/<name>.js\|.ts`; `opencode-tool`: `.../opencode/tool/<name>.ts`; `opencode-command`: `.../opencode/command/<name>.md` | whole-file copy of one named file |
-| JSON keys | JSON object | `claude-settings`: `~/.claude/settings.json`; `t3-settings`: `~/.t3/userdata/settings.json` | Terran owns only the listed top-level keys; every other key is preserved |
+| JSON keys | JSON object | `claude-settings`: `~/.claude/settings.json`; `t3-settings`: `~/.t3/userdata/settings.json`; `opencode-settings`: `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json` (mode 0600) | Terran owns only the listed top-level keys; every other key is preserved |
 | Tool | name | none | `terran doctor` requires it on `PATH`; mise installs it |
 
 Instruction and config sources are complete files, not merged. The instruction
@@ -482,8 +482,11 @@ manifests are still read and upgraded in memory):
 - `files`: `target` is `claude-agent`, `claude-command`, `claude-hook`,
   `opencode-plugin`, `opencode-tool`, or `opencode-command`; `name` matches
   `^[a-z0-9][a-z0-9._-]{0,127}$` with the extension that target allows.
-- `json_keys`: `claude-settings` or `t3-settings`; the source is a sanitized
-  JSON object holding only the keys Terran owns.
+- `json_keys`: `claude-settings`, `t3-settings`, or `opencode-settings`; the
+  source is a sanitized JSON object holding only the keys Terran owns.
+  `opencode-settings` and `opencode-config` share `opencode.json`, so a catalog
+  set may declare only one of them. Use `opencode-settings` when a tool such as
+  Naru also writes that file.
 - `tools`: names matching `^[a-z0-9][a-z0-9._-]{0,63}$`.
 - Any entry may carry `platforms` (`darwin`, `linux`). Without it the entry
   applies everywhere; on another platform it plans as `excluded`. Adding

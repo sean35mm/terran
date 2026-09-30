@@ -333,6 +333,28 @@ func TestInstructionCreateUpdateNoopDriftAndFiltering(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("drifted apply changed another target")
 	}
+
+	// Syncing the local edit into the catalog records it without rewriting the file.
+	if err := os.WriteFile(source, []byte("external edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, _ = Plan("claude")
+	if action := actionByIDOrFail(t, plan, "instruction/claude-global"); action.Action != "update" || action.Reason != matchesCatalogReason {
+		t.Fatalf("synced edit not recorded: %#v", action)
+	}
+	edited, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("claude", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := os.Stat(destination); err != nil || !os.SameFile(current, edited) {
+		t.Fatal("recording a synced edit rewrote the destination")
+	}
+	if plan, _ = Plan("claude"); !plan.Clean {
+		t.Fatalf("plan after recording synced edit: %#v", plan)
+	}
 }
 
 func TestAddingInstructionsLeavesExistingSkillsNoop(t *testing.T) {

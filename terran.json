@@ -1,13 +1,7 @@
 {
   "schema_version": 2,
   "id": "terran-default",
-  "version": "0.4.0",
-  "configs": [
-    {
-      "target": "opencode-config",
-      "source": "config/opencode/opencode.json"
-    }
-  ],
+  "version": "0.4.1",
   "instructions": [
     {
       "target": "claude-global",
@@ -18,36 +12,60 @@
       "source": "instructions/opencode/AGENTS.md"
     }
   ],
+  "json_keys": [
+    {
+      "target": "opencode-settings",
+      "source": "config/opencode/settings-keys.json"
+    }
+  ],
   "projections": [
     {
       "skill": "herdr",
       "source": "skills/herdr",
-      "targets": ["agents", "claude"]
+      "targets": [
+        "agents",
+        "claude"
+      ]
     },
     {
       "skill": "terran-curate-skills",
       "source": "skills/terran-curate-skills",
-      "targets": ["agents", "claude"]
+      "targets": [
+        "agents",
+        "claude"
+      ]
     },
     {
       "skill": "terran-diagnose",
       "source": "skills/terran-diagnose",
-      "targets": ["agents", "claude"]
+      "targets": [
+        "agents",
+        "claude"
+      ]
     },
     {
       "skill": "terran-fleet",
       "source": "skills/terran-fleet",
-      "targets": ["agents", "claude"]
+      "targets": [
+        "agents",
+        "claude"
+      ]
     },
     {
       "skill": "terran-provision",
       "source": "skills/terran-provision",
-      "targets": ["agents", "claude"]
+      "targets": [
+        "agents",
+        "claude"
+      ]
     },
     {
       "skill": "terran-update",
       "source": "skills/terran-update",
-      "targets": ["agents", "claude"]
+      "targets": [
+        "agents",
+        "claude"
+      ]
     }
   ]
 }

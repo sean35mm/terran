@@ -200,6 +200,81 @@ func TestJSONKeysLifecycleKeepsUnownedKeys(t *testing.T) {
 
 // The receipt is written indented; an adopted object value must still compare
 // equal to its applied hash so removal releases it instead of restoring.
+func TestJSONKeysSyncedEditRecordsReceiptOnly(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	settings := claudeSettings(t, home, `{"theme":"dark"}`, 0o600)
+	writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"claude-settings": `{"model":"opus"}`})
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, []byte(`{"model":"sonnet","theme":"dark"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertJSONKeyPlan(t, map[string]string{"model": "blocked_drift"})
+	writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"claude-settings": `{"model":"sonnet"}`})
+	plan := assertJSONKeyPlan(t, map[string]string{"model": "update"})
+	if action := actionByIDOrFail(t, plan, "json-keys/claude-settings/model"); action.Reason != matchesCatalogReason {
+		t.Fatalf("reason %q", action.Reason)
+	}
+	edited, _ := os.ReadFile(settings)
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(settings); !bytes.Equal(after, edited) {
+		t.Fatalf("recording a synced edit rewrote the file: %s", after)
+	}
+	if plan := assertJSONKeyPlan(t, map[string]string{"model": "noop"}); !plan.Clean {
+		t.Fatalf("plan after recording: %#v", plan)
+	}
+}
+
+func TestJSONKeysOpenCodeSettingsTarget(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	config := filepath.Join(home, "config", "opencode", "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte(`{"agents":{"naru":{"mode":"primary"}},"shell":"zsh"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"opencode-settings": `{"shell":"zsh","permission":{"bash":"ask"}}`})
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	plan := assertJSONKeyPlan(t, map[string]string{"shell": "adopt", "permission": "create"})
+	if action := actionByIDOrFail(t, plan, "json-keys/opencode-settings/permission"); action.Destination != config {
+		t.Fatalf("destination %q", action.Destination)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	after := decodedJSON(t, config)
+	if !reflect.DeepEqual(after["agents"], map[string]any{"naru": map[string]any{"mode": "primary"}}) || !reflect.DeepEqual(after["permission"], map[string]any{"bash": "ask"}) || fileMode(t, config) != 0o600 {
+		t.Fatalf("opencode settings: %#v %04o", after, fileMode(t, config))
+	}
+
+	// The whole-file config target and the settings keys cannot share opencode.json.
+	if err := os.WriteFile(filepath.Join(repo, "config.json"), []byte(`{"shell":"zsh"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var manifest Manifest
+	data, _ := os.ReadFile(filepath.Join(repo, "terran.json"))
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Configs = []Config{{Target: "opencode-config", Source: "config.json"}}
+	data, _ = json.MarshalIndent(manifest, "", "  ")
+	if err := os.WriteFile(filepath.Join(repo, "terran.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Plan("all"); err == nil || !strings.Contains(err.Error(), "both resolve to") {
+		t.Fatalf("shared destination not rejected: %v", err)
+	}
+}
+
 func TestJSONKeysAdoptedObjectValueReleases(t *testing.T) {
 	home, repo := fileEnvironment(t)
 	claudeSettings(t, home, `{"a":{"b":[1,2],"c":"<x>"}}`, 0o644)

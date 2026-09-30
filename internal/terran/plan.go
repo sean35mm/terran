@@ -615,6 +615,14 @@ func classifyInstruction(paths Paths, action Action, sourceHash string, prior Re
 			return "blocked_drift", "receipt-owned instruction is missing or unsafe: " + err.Error()
 		}
 		hash, err := fileHash(action.Destination)
+		if err == nil && hash != prior.AppliedHash && hash == sourceHash {
+			// Edited on this machine and then synced into the catalog, or an
+			// apply interrupted before its receipt write: only the receipt moves.
+			if err := validateExecutableMode(action.Kind, action.Target, action.Destination); err != nil {
+				return "blocked_drift", err.Error()
+			}
+			return "update", matchesCatalogReason
+		}
 		if err != nil || hash != prior.AppliedHash {
 			return "blocked_drift", "receipt-owned instruction is missing or changed"
 		}
@@ -808,6 +816,10 @@ func classifySkill(paths Paths, action Action, sourceHash string, prior ReceiptP
 // recoverSkillReason marks an update that only records an already-installed
 // copy in the receipt.
 const recoverSkillReason = "recover interrupted apply (content already matches catalog)"
+
+// matchesCatalogReason marks an update of an owned file or settings key whose
+// destination already holds the catalog content; apply writes only the receipt.
+const matchesCatalogReason = "destination already matches catalog; record it"
 
 // classifySkillRemoval plans an owned skill that is no longer desired: a
 // created copy or legacy link is removed, an adopted copy is released.
@@ -1946,6 +1958,9 @@ type instructionRollback struct {
 
 func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior ReceiptManaged, verifiedSource []byte, expected resolvedCollision, hasExpected bool) (instructionRollback, error) {
 	rollback := instructionRollback{destination: action.Destination}
+	if action.Reason == matchesCatalogReason {
+		return rollback, nil
+	}
 	if action.Action == "adopt" || action.Action == "replace" {
 		data, mode, err := readSafeFile(action.Destination, "instruction destination")
 		if err != nil {

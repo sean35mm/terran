@@ -12,7 +12,7 @@ Terran has no self-updater and never fetches a catalog. Two things update separa
 
 ## Schema v2
 
-Catalogs at schema version 2 can use `files`, `json_keys`, `tools`, `platforms`, more targets (`codex-global`, `mise-config`, `mise-lock`, `claude-settings`, `t3-settings`, and file targets), and a private overlay. Terran 0.4 still reads schema 1 manifests, enrollments, and receipts and writes schema 2 when it next saves them; older binaries cannot read schema 2 state.
+Catalogs at schema version 2 can use `files`, `json_keys`, `tools`, `platforms`, more targets (`codex-global`, `mise-config`, `mise-lock`, `claude-settings`, `t3-settings`, `opencode-settings` (0.4.1), and file targets), and a private overlay. Terran 0.4 still reads schema 1 manifests, enrollments, and receipts and writes schema 2 when it next saves them; older binaries cannot read schema 2 state.
 
 Therefore: every machine needs Terran 0.4 or newer before a catalog that uses v2 features reaches it. Update binaries first, catalogs second.
 

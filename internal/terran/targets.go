@@ -122,6 +122,16 @@ var targetSpecs = []TargetSpec{
 		Mode:     0o644,
 		Validate: validateOpenCodeConfig,
 	},
+	{
+		ID:    "opencode-settings",
+		Kind:  "json-keys",
+		Group: "opencode",
+		Dest: func(p Paths, name string) (string, error) {
+			return filepath.Join(p.ConfigBase, "opencode", "opencode.json"), nil
+		},
+		Mode:     0o600,
+		Validate: validateOpenCodeConfig,
+	},
 	fileTarget("claude-agent", "claude", 0o644, []string{".md"}, func(p Paths) string { return filepath.Join(p.Home, ".claude", "agents") }),
 	fileTarget("claude-command", "claude", 0o644, []string{".md"}, func(p Paths) string { return filepath.Join(p.Home, ".claude", "commands") }),
 	fileTarget("claude-hook", "claude", 0o755, nil, func(p Paths) string { return filepath.Join(p.Home, ".claude", "hooks") }),

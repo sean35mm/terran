@@ -35,7 +35,7 @@ Edit `terran.json` in the chosen catalog. Sources are clean relative paths insid
 | `instructions` | complete global instruction file | `claude-global`, `opencode-global`, `codex-global` |
 | `configs` | whole config file (strict, sanitized) | `opencode-config`, `naru-runtime`, `mise-config`, `mise-lock` |
 | `files` (`target`, `name`, `source`) | one named file in a fixed directory | `claude-agent`, `claude-command`, `claude-hook`, `opencode-plugin`, `opencode-tool`, `opencode-command` |
-| `json_keys` | owned top-level keys of a shared settings file | `claude-settings`, `t3-settings` |
+| `json_keys` | owned top-level keys of a shared settings file | `claude-settings`, `t3-settings`, `opencode-settings` (not together with `opencode-config`) |
 | `tools` (`name`) | CLI that `terran doctor` requires on `PATH` | none |
 
 Every entry except `tools` takes `source`; every entry can take `platforms`. For `json_keys`, the source is a JSON object holding only the keys Terran should own; Terran preserves every other key in the settings file. Use sorted keys in any JSON you write. Do not add targets, commands, or destinations to Terran itself.

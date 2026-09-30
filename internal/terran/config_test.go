@@ -187,10 +187,10 @@ func TestConfigManifestRejectsInvalidEntriesAndCanonicalSourceIsSafe(t *testing.
 			t.Fatal(err)
 		}
 		catalog, err := LoadManifest(root)
-		if err != nil || len(catalog.Manifest.Configs) != 1 {
-			t.Fatalf("default catalog config targets: %#v %v", catalog.Manifest.Configs, err)
+		if err != nil || len(catalog.Manifest.JSONKeys) != 1 || catalog.Manifest.JSONKeys[0].Target != "opencode-settings" {
+			t.Fatalf("default catalog json-keys targets: %#v %v", catalog.Manifest.JSONKeys, err)
 		}
-		data, err := os.ReadFile(filepath.Join("..", "..", "config", "opencode", "opencode.json"))
+		data, err := os.ReadFile(filepath.Join("..", "..", "config", "opencode", "settings-keys.json"))
 		if err != nil {
 			t.Fatal(err)
 		}

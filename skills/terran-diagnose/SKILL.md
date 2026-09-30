@@ -26,7 +26,7 @@ Add `--target agents|claude|opencode|codex|mise|t3` to narrow. `doctor` also rep
 | `noop` | up to date | nothing to do |
 | `create` | missing, will be created | safe pending work |
 | `adopt` | identical item already exists | Terran takes ownership, active file untouched |
-| `update` | catalog changed | safe pending work; the reason `convert live symlink to managed copy` is the one-time upgrade of a 0.3 skill link; `recover interrupted apply (content already matches catalog)` only records a copy an interrupted apply already installed |
+| `update` | catalog changed | safe pending work; the reason `convert live symlink to managed copy` is the one-time upgrade of a 0.3 skill link; `recover interrupted apply (content already matches catalog)` only records a copy an interrupted apply already installed; `destination already matches catalog; record it` only records an owned file or settings key whose local edit was synced into the catalog |
 | `replace` | a collision decided `replace` | the original is backed up privately |
 | `remove` / `restore` | no longer in the catalog | created items are deleted; adopted originals are restored |
 | `release` | adopted settings key or skill left the catalog | ownership dropped, the value or directory stays |

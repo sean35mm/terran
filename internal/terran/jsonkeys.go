@@ -160,6 +160,9 @@ func classifyJSONKey(file jsonSettings, key string, desired json.RawMessage, pri
 			return "blocked_drift", "receipt-owned key is missing"
 		}
 		if hashBytes(current) != prior.AppliedHash {
+			if desired != nil && bytes.Equal(current, desired) {
+				return "update", matchesCatalogReason
+			}
 			return "blocked_drift", "receipt-owned key changed"
 		}
 		switch {
@@ -272,6 +275,9 @@ func mutateJSONKeys(paths Paths, catalogs Catalogs, plan PlanResult, target stri
 		}
 		switch action.Action {
 		case "create", "update", "replace":
+			if action.Reason == matchesCatalogReason {
+				continue
+			}
 			value, ok := loaded.JSONKeyValues[target][action.Name]
 			if !ok {
 				return rollback, fmt.Errorf("json key %s is no longer in the catalog", action.ID)
