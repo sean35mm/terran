@@ -72,7 +72,8 @@ Agent skills in this catalog carry the detailed workflows:
 - `terran-curate-skills`: add, adapt, remove, or audit catalog items.
 - `terran-diagnose`: explain and fix failures.
 - `terran-update`: update the binary or catalogs.
-- `terran-fleet`: update, diagnose, or fix other Command Centers over SSH.
+- `terran-fleet`: update, diagnose, fix, or connect (SSH and Herdr) other Command Centers.
+- `terran-dispatch`: run, watch, message, collect, or hand off agent work on other Command Centers through Herdr.
 
 ## Request to skill to commands
 
@@ -86,6 +87,8 @@ Agent skills in this catalog carry the detailed workflows:
 | "Update Terran" | `terran-update` | `terran version --json`, `terran status`, `terran plan --json`, `terran apply --expect D` |
 | "Update cc2 with what I added on cc1" | `terran-fleet` | `git status`/`rev-parse` here, then over SSH: `git fetch`, `git merge --ff-only COMMIT`, `terran plan --json`, `terran apply --expect D`, `terran doctor --json` |
 | "Is cc3 behind?" / "Fix cc2" | `terran-fleet` | `terran status --json`, `terran status cc2 --json`, then over SSH: `terran doctor --json`, `terran plan --json`, `terran capture --json` |
+| "Connect all my machines" | `terran-fleet` | `ssh -o BatchMode=yes ALIAS true`, `herdr machine list --json`, `herdr machine add ALIAS --label NAME --remote-session default`, `herdr machine status --json` |
+| "Have cc2 work on X" / "What are my agents doing?" | `terran-dispatch` | `herdr --machine NAME worktree create`, `agent start`, `agent prompt`, `agent wait`, `agent list`, then `git fetch ALIAS:REPO BRANCH` |
 
 Command Center names are a convention the user chooses (for example `cc1`,
 `cc2`); Terran requires only a unique display name.
@@ -103,6 +106,16 @@ one non-interactive `ssh -o BatchMode=yes <alias> ...` call with a fixed
 argument vector, shown to you before it runs. Collisions still need your
 per-item choice, and drift still blocks until you decide. The `terran cc`
 wrapper commands are not part of 0.4.
+
+Every Command Center also saves every other one in Herdr under its Command
+Center name (`herdr machine add`), so `herdr --machine cc2 ...` reaches cc2 from
+any machine. `terran-provision` links a new machine both ways when it joins,
+and `terran-fleet` repairs missing links. On that mesh, `terran-dispatch` starts
+an agent in a fresh worktree on another machine, sends the task through Herdr's
+API (never through a remote shell), waits and notifies you, and brings the
+branch back with `git fetch` over SSH, so nothing is pushed on your behalf.
+Macs accept fleet SSH only with a dedicated key without a passphrase, limited
+to Tailscale addresses, because non-interactive SSH cannot unlock a key.
 
 ## Command reference
 

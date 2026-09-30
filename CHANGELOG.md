@@ -2,6 +2,11 @@
 
 All notable changes are documented here. Terran follows semantic versioning.
 
+## 0.4.2 - 2026-09-30
+
+- New skill `terran-dispatch`: start an agent in a fresh worktree on another Command Center through Herdr's saved machines (`herdr --machine`), watch it with local notifications, message it, show every machine's agents in one table, bring its branch back with `git fetch` over SSH, and hand a task off to another machine with a note.
+- `terran-fleet` gains "Connect the fleet": SSH and Herdr links between every pair of Command Centers, including per-host usernames and a dedicated fleet key for Macs limited to Tailscale addresses. `terran-provision` runs it when a machine joins, so new machines are linked both ways.
+
 ## 0.4.1 - 2026-09-29
 
 - An owned instruction, config, file, or settings key whose destination already matches the catalog plans `update` with the reason `destination already matches catalog; record it`, and apply writes only the receipt. Editing on one machine and syncing the edit into the catalog no longer leaves that machine at `blocked_drift`.

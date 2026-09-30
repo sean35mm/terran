@@ -31,8 +31,8 @@ Every command below needs the user's approval before you run it.
 macOS has no Tailscale SSH server for the app builds, so use Remote Login:
 
 - The user enables System Settings > General > Sharing > Remote Login (scoped to their own account).
-- The controlling machine's public key goes in `~/.ssh/authorized_keys` on this machine. The user provides the public key; you never read or print private keys.
-- `ssh` uses `BatchMode`, so key authentication must work non-interactively. Test with `ssh <name> true` from the controlling machine.
+- Each other Command Center's dedicated fleet key goes in `~/.ssh/authorized_keys` on this machine, limited to Tailscale addresses; see the `terran-fleet` procedure "Connect the fleet". You copy only public keys; never read or print private keys.
+- `ssh` uses `BatchMode`, so key authentication must work non-interactively: a key with a passphrase fails. Test with `ssh -o BatchMode=yes <alias> true` from each other machine.
 - Restrict Tailscale ACLs to the user's own devices where possible.
 
 ## Platform notes

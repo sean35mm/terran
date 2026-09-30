@@ -86,11 +86,13 @@ The user performs each login (Tailscale, GitHub, Claude, Codex, and others the c
 
   Keep the existing entries; `name` values are unique; `ssh` must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
 - Commit the overlay change if the user asks, then ask them to push. Never push yourself.
+- Then join the fleet: follow the `terran-fleet` procedure "Connect the fleet (SSH and Herdr)" with this machine as both A (it reaches every other one) and B (every other one reaches it). Macs need the dedicated fleet key described there, because `BatchMode` cannot unlock a key with a passphrase.
 
 ## 10. Verify
 
 - `terran doctor` is healthy (warnings are explained, failures are not left).
 - `terran status --local` is clean; `terran status` shows the new row.
+- `herdr machine status --json` lists every other Command Center as `reachable`, here and on the others.
 - `claude mcp list` and `codex mcp list` show the expected servers.
 - One smoke prompt per installed harness (for example, ask it to name a projected skill).
 

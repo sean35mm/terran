@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "terran-default",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "instructions": [
     {
       "target": "claude-global",
@@ -38,6 +38,14 @@
     {
       "skill": "terran-diagnose",
       "source": "skills/terran-diagnose",
+      "targets": [
+        "agents",
+        "claude"
+      ]
+    },
+    {
+      "skill": "terran-dispatch",
+      "source": "skills/terran-dispatch",
       "targets": [
         "agents",
         "claude"

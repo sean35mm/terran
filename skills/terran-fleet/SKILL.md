@@ -1,6 +1,6 @@
 ---
 name: terran-fleet
-description: Update, sync, diagnose, or fix another Terran Command Center from this one over SSH (for example "update cc2 with what I added on cc1", "is cc3 behind?", "fix cc2"); do not use for setting up the current machine or for generic SSH work.
+description: Update, sync, diagnose, fix, or connect (SSH and Herdr links) other Terran Command Centers from this one (for example "update cc2 with what I added on cc1", "is cc3 behind?", "fix cc2", "connect all my machines in Herdr"); do not use for setting up the current machine, dispatching agent work (terran-dispatch), or generic SSH work.
 ---
 
 # Operating other Command Centers
@@ -134,6 +134,55 @@ Other blockers: `repository_mismatch`, `overlay_unavailable`, `receipt_invalid`,
 3. Present all plans together, one section per target, with each digest, collisions, drift, and excluded items called out. Targets on different platforms differ in `excluded` items; say so.
 4. Get approval per target. Apply each target only after its approval (steps e to g), sequentially. A target that is unreachable, dirty, not a fast-forward, or blocked is reported and skipped; the others continue only if the user said so.
 5. Finish with `terran status` and a table of every machine: version, commits, state.
+6. Run procedure 5 so every machine can still reach every other one in Herdr.
+
+## 5. Connect the fleet (SSH and Herdr)
+
+Goal: every Command Center reaches every other one with `ssh -o BatchMode=yes <alias> true`, and every Command Center has every other one saved in Herdr under its Command Center name, so `herdr --machine <name> ...` works from anywhere (`terran-dispatch` depends on it). Links are one-directional: n machines need n × (n − 1) of each. Run this for a new machine (called from `terran-provision`), after `command-centers.json` changes, and whenever `herdr machine status` shows a problem.
+
+Read `command-centers.json` from the overlay on this machine: each entry's `name`, `platform`, and `ssh` alias.
+
+### SSH, from machine A to machine B
+
+Test from A: `ssh -o BatchMode=yes -o ConnectTimeout=5 <B alias> true`. For a remote A, run the test through A (`ssh -o BatchMode=yes <A alias> ssh -o BatchMode=yes -o ConnectTimeout=5 <B alias> true`). Fix by the error, with the user's approval for each change:
+
+- `tailnet policy does not permit you to SSH as user "<x>"` or `Permission denied` with the wrong user: B's username differs. Ask the user for it and append to `~/.ssh/config` on A (show the file first; never touch other `Host` blocks; if a block for the alias exists, show it and ask):
+
+  ```
+  Host <B alias>
+      User <B username>
+  ```
+
+- B is Linux: B needs Tailscale SSH (`sudo tailscale up --ssh`, see `terran-provision` `omarchy.md`); no keys are involved, and the Tailscale policy must allow A's user to log in as B's user.
+- B is macOS: the Tailscale app has no SSH server, so B uses Remote Login with a key from A. `BatchMode` cannot unlock a key with a passphrase (the log shows `Server accepts key` and then `Permission denied`). Use a dedicated fleet key on A, with no passphrase, that B accepts only from Tailscale addresses:
+  1. On A (approval): `ssh-keygen -t ed25519 -N "" -C "terran-fleet <A name>" -f ~/.ssh/terran_fleet_ed25519`. Skip if it exists.
+  2. Add to A's `Host <B alias>` block: `IdentityFile ~/.ssh/terran_fleet_ed25519` and `IdentitiesOnly yes`.
+  3. On B (approval), append one line to `~/.ssh/authorized_keys` (mode 0600, `~/.ssh` 0700): `from="100.64.0.0/10,fd7a:115c:a1e0::/48" ` followed by the contents of A's `~/.ssh/terran_fleet_ed25519.pub`. Copy only the public key; never read or print a private key.
+- `Connection timed out` or `offline`: B is off or not on Tailscale. Report and skip it.
+
+### Herdr, from machine A to machine B
+
+On A (prefix each command with `ssh -o BatchMode=yes <A alias>` when A is remote):
+
+```sh
+herdr machine list --json
+```
+
+If no entry has `label` equal to B's name, and SSH from A to B works:
+
+```sh
+herdr machine add <B alias> --label <B name> --remote-session default
+```
+
+It prepares Herdr's server on B and saves the profile; it prints `Remote server is ready`. If an entry with B's label points at a different target, show it and ask before `herdr machine remove <id>` and re-adding. Never add this machine to itself.
+
+Verify on every machine:
+
+```sh
+herdr machine status --json
+```
+
+Every entry should be `reachable`. Report a table of links (from, to, SSH, Herdr) and every failure with its exact error. Non-interactive SSH may not have `herdr` on `PATH`; if `command not found`, use its full path (`command -v herdr` on that machine in an interactive shell, often `~/.local/bin/herdr`).
 
 ## Should trigger
 
@@ -142,6 +191,7 @@ Other blockers: `repository_mismatch`, `overlay_unavailable`, `receipt_invalid`,
 - "Fix cc2." / "What's wrong with cc2?"
 - "Sync all my other machines."
 - "Why does cc2 show drift and how do I clear it?"
+- "Connect all my machines in Herdr." / "cc3 can't reach cc1."
 
 ## Should not trigger
 
@@ -150,3 +200,4 @@ Other blockers: `repository_mismatch`, `overlay_unavailable`, `receipt_invalid`,
 - "Why does this machine's doctor fail?" (use `terran-diagnose`)
 - "SSH into my server and restart nginx."
 - "Copy this file to another host."
+- "Have cc2 work on this bug." (use `terran-dispatch`)

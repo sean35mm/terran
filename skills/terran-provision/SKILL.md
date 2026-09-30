@@ -36,8 +36,9 @@ Command Center names are a convention the user chooses (for example `cc1`, `cc2`
 6. `terran plan --json`, show the user, get approval, `terran apply --expect <digest>` (with `--decide` only as the user decides).
 7. `mise install`, then the private checklist `provision/checklist.md` in the overlay (harness plugin installers such as Naru, Claude plugins, MCP servers via `claude mcp add --scope user` and `codex mcp add`, Codex `config.toml` entries).
 8. Logins, done by the user.
-9. Fleet access: the Tailscale machine name equals the Command Center name; macOS Remote Login; Linux `tailscale up --ssh`; add the machine to `command-centers.json` in the overlay, commit, ask the user to push.
-10. Verify: `terran doctor`, `terran status`, `claude mcp list`, `codex mcp list`, and a smoke prompt per harness.
+9. Fleet access: macOS Remote Login; Linux `tailscale up --ssh`; add the machine to `command-centers.json` in the overlay, commit, ask the user to push.
+10. Join the fleet: run the `terran-fleet` procedure "Connect the fleet (SSH and Herdr)" for this machine in both directions: this machine reaches and saves every other Command Center in Herdr, and every reachable Command Center reaches and saves this one. This is what makes a new machine show up everywhere.
+11. Verify: `terran doctor`, `terran status`, `herdr machine status --json`, `claude mcp list`, `codex mcp list`, and a smoke prompt per harness.
 
 Items that should flow back into a catalog go through `terran-curate-skills`. Failures go through `terran-diagnose`.
 
