@@ -492,10 +492,12 @@ manifests are still read and upgraded in memory):
 - `instructions`: `claude-global`, `opencode-global`, `codex-global`.
 - `configs`: `opencode-config`, `naru-runtime` (strict sanitized JSON),
   `mise-config`, `mise-lock` (text), `ssh-config` (an ssh_config fragment that
-  `~/.ssh/config` includes), and `ssh-authorized-keys` (comments and public key
-  lines only, each optionally prefixed with sshd options such as `from=`). The
-  SSH targets reject private key material and absolute machine paths; they
-  belong in the private overlay.
+  `~/.ssh/config` includes; only literal `Host` blocks with `HostName`, `User`,
+  `Port`, `IdentityFile ~/.ssh/<name>`, and `IdentitiesOnly`), and
+  `ssh-authorized-keys` (public key lines only, each with a literal `from="..."`
+  limit and at most `restrict` or `no-*` flags). Both SSH targets are accepted
+  only from a private overlay; a primary catalog declaring them is
+  `manifest_invalid`.
 - `files`: `target` is `claude-agent`, `claude-command`, `claude-hook`,
   `opencode-plugin`, `opencode-tool`, or `opencode-command`; `name` matches
   `^[a-z0-9][a-z0-9._-]{0,127}$` with the extension that target allows.

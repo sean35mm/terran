@@ -72,9 +72,119 @@ func validateTextConfig(data []byte) error {
 	return nil
 }
 
-// validateSSHConfig accepts an ssh_config fragment: text rules, and never
-// key material.
+// validateSSHConfig accepts an ssh_config fragment of literal Host blocks
+// using only directives that cannot run commands or reroute other hosts.
 func validateSSHConfig(data []byte) error {
+	if err := validateSSHConfigText(data); err != nil {
+		return err
+	}
+	inHost := false
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		words := strings.Fields(strings.Replace(line, "=", " ", 1))
+		key, value := words[0], strings.Join(words[1:], " ")
+		switch strings.ToLower(key) {
+		case "host":
+			for _, alias := range strings.Fields(value) {
+				if !sshAliasPattern.MatchString(alias) {
+					return fmt.Errorf("line %d: Host must list literal aliases", i+1)
+				}
+			}
+			inHost = value != ""
+			continue
+		case "hostname", "user":
+			if !sshConfigValue.MatchString(value) {
+				return fmt.Errorf("line %d: invalid %s", i+1, key)
+			}
+		case "port":
+			if !sshPortPattern.MatchString(value) {
+				return fmt.Errorf("line %d: invalid Port", i+1)
+			}
+		case "identityfile":
+			if !sshIdentityFile.MatchString(value) {
+				return fmt.Errorf("line %d: IdentityFile must be ~/.ssh/<name>", i+1)
+			}
+		case "identitiesonly":
+			if value != "yes" && value != "no" {
+				return fmt.Errorf("line %d: IdentitiesOnly must be yes or no", i+1)
+			}
+		default:
+			return fmt.Errorf("line %d: ssh directive %q is not allowed", i+1, key)
+		}
+		if !inHost {
+			return fmt.Errorf("line %d: directives must follow a Host line", i+1)
+		}
+	}
+	return nil
+}
+
+var (
+	sshConfigValue  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,252}$`)
+	sshPortPattern  = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
+	sshIdentityFile = regexp.MustCompile(`^~/\.ssh/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	sshKeyType      = regexp.MustCompile(`^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)$`)
+	sshKeyData      = regexp.MustCompile(`^AAAA[A-Za-z0-9+/]+={0,3}$`)
+	sshFromValue    = regexp.MustCompile(`^"[0-9A-Fa-f.:/,]+"$`)
+	sshFlagOptions  = map[string]bool{"restrict": true, "no-agent-forwarding": true, "no-port-forwarding": true, "no-pty": true, "no-user-rc": true, "no-x11-forwarding": true}
+)
+
+// validateAuthorizedKeys accepts comments and lines of the form
+// `from="<addresses>"[,flags] <type> <base64> [comment]`: every key is limited
+// to literal source addresses, and no option can run a command, open a
+// tunnel, or trust a certificate authority.
+func validateAuthorizedKeys(data []byte) error {
+	if err := validateSSHConfigText(data); err != nil {
+		return err
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 || !sshKeyType.MatchString(fields[1]) || !sshKeyData.MatchString(fields[2]) {
+			return fmt.Errorf("line %d must be from=\"...\" options, a key type, and key data", i+1)
+		}
+		hasFrom := false
+		for _, option := range splitSSHOptions(fields[0]) {
+			name, value, found := strings.Cut(option, "=")
+			switch {
+			case found && strings.EqualFold(name, "from") && sshFromValue.MatchString(value):
+				hasFrom = true
+			case !found && sshFlagOptions[strings.ToLower(name)]:
+			default:
+				return fmt.Errorf("line %d: authorized_keys option %q is not allowed", i+1, option)
+			}
+		}
+		if !hasFrom {
+			return fmt.Errorf("line %d: every key needs a from=\"...\" address limit", i+1)
+		}
+	}
+	return nil
+}
+
+// splitSSHOptions splits an authorized_keys option list on commas outside
+// double quotes.
+func splitSSHOptions(options string) []string {
+	var parts []string
+	start, quoted := 0, false
+	for i, r := range options {
+		switch {
+		case r == '"':
+			quoted = !quoted
+		case r == ',' && !quoted:
+			parts = append(parts, options[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, options[start:])
+}
+
+// validateSSHConfigText applies the text rules shared by ssh files.
+func validateSSHConfigText(data []byte) error {
 	if err := validateTextConfig(data); err != nil {
 		return err
 	}
@@ -83,26 +193,6 @@ func validateSSHConfig(data []byte) error {
 	}
 	return nil
 }
-
-// validateAuthorizedKeys accepts only comments and public key lines, each
-// optionally prefixed with sshd options such as from="...".
-func validateAuthorizedKeys(data []byte) error {
-	if err := validateSSHConfig(data); err != nil {
-		return err
-	}
-	for i, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if !publicKeyLine.MatchString(line) {
-			return fmt.Errorf("line %d is not a public key entry", i+1)
-		}
-	}
-	return nil
-}
-
-var publicKeyLine = regexp.MustCompile(`(^|[\s,"])(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) AAAA[A-Za-z0-9+/]+={0,3}( |$)`)
 
 func decodeUniqueJSONValue(dec *json.Decoder, path string) (any, error) {
 	token, err := dec.Token()

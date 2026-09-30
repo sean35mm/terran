@@ -4,7 +4,7 @@ All notable changes are documented here. Terran follows semantic versioning.
 
 ## 0.4.3 - 2026-09-30
 
-- New `ssh-config` (`~/.ssh/terran-fleet.conf`) and `ssh-authorized-keys` (`~/.ssh/authorized_keys`) config targets, mode 0600. Their sources may hold only ssh_config text or public key lines; private keys and absolute machine paths are rejected.
+- New `ssh-config` (`~/.ssh/terran-fleet.conf`) and `ssh-authorized-keys` (`~/.ssh/authorized_keys`) config targets, mode 0600, accepted only from a private overlay catalog. `ssh-config` sources may hold only literal `Host` blocks with `HostName`, `User`, `Port`, `IdentityFile ~/.ssh/<name>`, and `IdentitiesOnly`; `ssh-authorized-keys` sources only public key lines that each carry a literal `from="..."` limit and at most `restrict` or `no-*` flags. Private keys, commands, wildcards, and absolute machine paths are rejected.
 - `command-centers.json` accepts an optional `user` per machine; `terran status` passes it to ssh as `-o User=`.
 - Skills: joining the fleet is agent-only after the machine is on Tailscale. Fleet public keys, the ssh config fragment, and authorized keys live in the private overlay and reach every machine through plan and apply; agents may commit and push fleet-membership changes to the private overlay; provisioning and fleet runs support an unattended mode that stops only for logins, secrets, destructive steps, and differing collisions.
 

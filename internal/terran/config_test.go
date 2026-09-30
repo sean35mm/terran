@@ -553,23 +553,42 @@ func TestValidateTextConfig(t *testing.T) {
 
 func TestSSHTargetsValidateContent(t *testing.T) {
 	key := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN/5oxSH40N+n5n0Jzv2TR4ma9HQS/jrsvf5j12Rst6G terran-fleet cc2"
-	if err := validateAuthorizedKeys([]byte("# fleet\n" + `from="100.64.0.0/10,fd7a:115c:a1e0::/48" ` + key + "\n" + key + "\n")); err != nil {
+	from := `from="100.64.0.0/10,fd7a:115c:a1e0::/48"`
+	if err := validateAuthorizedKeys([]byte("# fleet\n" + from + " " + key + "\n" + from + ",restrict " + key + "\n")); err != nil {
 		t.Fatalf("valid authorized keys rejected: %v", err)
 	}
 	for name, body := range map[string]string{
-		"private key": "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n",
-		"command":     "curl example | sh\n",
-		"bare option": `from="100.64.0.0/10"` + "\n",
+		"private key":    "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n",
+		"command":        "curl example | sh\n",
+		"bare option":    from + "\n",
+		"no from":        key + "\n",
+		"any address":    `from="*" ` + key + "\n",
+		"forced command": `command="sh -c id",` + from + " " + key + "\n",
+		"cert authority": `cert-authority,` + from + " " + key + "\n",
+		"environment":    `environment="X=y",` + from + " " + key + "\n",
+		"permitlisten":   `permitlisten="0.0.0.0:80",` + from + " " + key + "\n",
 	} {
 		if validateAuthorizedKeys([]byte(body)) == nil {
 			t.Fatalf("%s accepted", name)
 		}
 	}
-	if err := validateSSHConfig([]byte("Host omarchy\n    User sgil\n    IdentityFile ~/.ssh/terran_fleet_ed25519\n    IdentitiesOnly yes\n")); err != nil {
+	if err := validateSSHConfig([]byte("# fleet\nHost omarchy other-host\n    User sgil\n\tIdentityFile ~/.ssh/terran_fleet_ed25519\n    IdentitiesOnly yes\n    Port=2222\n")); err != nil {
 		t.Fatalf("valid ssh config rejected: %v", err)
 	}
-	if validateSSHConfig([]byte("Host a\n    IdentityFile /Users/someone/.ssh/id\n")) == nil {
-		t.Fatal("absolute machine path accepted")
+	for name, body := range map[string]string{
+		"absolute path":  "Host a\n    IdentityFile /Users/someone/.ssh/id\n",
+		"proxy command":  "Host a\n    ProxyCommand sh -c id\n",
+		"wildcard host":  "Host *\n    User x\n",
+		"negated host":   "Host !a\n    User x\n",
+		"match exec":     "Match exec \"id\"\n",
+		"include":        "Include ~/x\n",
+		"forward agent":  "Host a\n    ForwardAgent yes\n",
+		"global setting": "User x\nHost a\n",
+		"local command":  "Host a\n    LocalCommand id\n",
+	} {
+		if validateSSHConfig([]byte(body)) == nil {
+			t.Fatalf("%s accepted", name)
+		}
 	}
 	home := t.TempDir()
 	paths := Paths{Home: home, ConfigBase: filepath.Join(home, ".config")}
@@ -581,5 +600,23 @@ func TestSSHTargetsValidateContent(t *testing.T) {
 		if got, _ := spec.Dest(paths, ""); got != want {
 			t.Fatalf("%s destination %q", target, got)
 		}
+	}
+}
+
+func TestSSHTargetsOnlyInOverlay(t *testing.T) {
+	_, repo := configEnvironment(t, false)
+	if err := os.MkdirAll(filepath.Join(repo, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "config", "fleet.conf"), []byte("Host a\n    User b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogWithConfigs(t, repo, nil, []Config{{Target: "ssh-config", Source: "config/fleet.conf"}})
+	if _, _, err := Enroll(repo, "test", "", false); err == nil {
+		if _, err := Plan("all"); err == nil || !strings.Contains(err.Error(), "only in a private overlay") {
+			t.Fatalf("primary catalog ssh target not rejected: %v", err)
+		}
+	} else if !strings.Contains(err.Error(), "only in a private overlay") {
+		t.Fatalf("enroll: %v", err)
 	}
 }

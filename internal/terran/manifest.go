@@ -385,6 +385,13 @@ func LoadCatalogs(e Enrollment) (Catalogs, error) {
 
 func combineCatalogs(primary LoadedManifest, overlay *LoadedManifest) (Catalogs, error) {
 	catalogs := Catalogs{Primary: primary, Overlay: overlay}
+	// Fleet SSH access must come from the user's private overlay, never from
+	// a shared public catalog.
+	for _, target := range []string{"ssh-config", "ssh-authorized-keys"} {
+		if _, ok := primary.ConfigSources[target]; ok {
+			return Catalogs{}, Coded(CodeManifestInvalid, nextManifest, fmt.Errorf("config target %s is allowed only in a private overlay catalog", target))
+		}
+	}
 	overlayFingerprint := ""
 	if overlay != nil {
 		p, o := primary.Manifest, overlay.Manifest
