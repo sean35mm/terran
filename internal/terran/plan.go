@@ -358,13 +358,16 @@ func makePlan(paths Paths, catalogs Catalogs, receipt Receipt, holds []string, f
 			})
 		}
 	}
+	jsonClaimed := jsonKeysDestinations(paths, catalogs)
 	for id, prior := range ownedManaged {
 		if !selectedManaged(filter, prior.Kind, prior.Target) || desiredManaged[id] {
 			continue
 		}
 		destination, _ := managedFileDestination(paths, prior.Kind, prior.Target, prior.Name)
 		action := Action{ID: id, Kind: prior.Kind, Catalog: prior.Catalog, Target: prior.Target, Name: prior.Name, Source: prior.Source, Destination: destination}
-		add(action, func() (string, string) { return classifyInstructionRemoval(paths, prior, destination) })
+		add(action, func() (string, string) {
+			return classifyInstructionRemoval(paths, prior, destination, jsonClaimed[destination])
+		})
 	}
 	ownedJSONKeys := map[string]ReceiptJSONKey{}
 	for _, entry := range receipt.JSONKeys {
@@ -690,7 +693,26 @@ func validateProspectiveInstructionParent(parent string) error {
 	}
 }
 
-func classifyInstructionRemoval(paths Paths, prior ReceiptManaged, destination string) (string, string) {
+// jsonKeysDestinations lists the settings files desired json-keys items write.
+func jsonKeysDestinations(paths Paths, catalogs Catalogs) map[string]bool {
+	claimed := map[string]bool{}
+	for _, loaded := range catalogs.list() {
+		for _, item := range loaded.Manifest.JSONKeys {
+			if destination, err := jsonKeysDestination(paths, item.Target); err == nil && platformIncluded(item.Platforms) {
+				claimed[destination] = true
+			}
+		}
+	}
+	return claimed
+}
+
+// classifyInstructionRemoval plans an owned file that left the catalog. When
+// json-keys items now write the same file (opencode-config replaced by
+// opencode-settings), whole-file ownership is released and the file is kept.
+func classifyInstructionRemoval(paths Paths, prior ReceiptManaged, destination string, sharedWithJSONKeys bool) (string, string) {
+	if sharedWithJSONKeys {
+		return "release", "settings keys now own this file; keep it and drop whole-file ownership"
+	}
 	if prior.Destination != destination {
 		return "blocked_drift", "CODEX_HOME changed"
 	}
@@ -1666,7 +1688,7 @@ func preflightAction(paths Paths, catalogs Catalogs, action Action, ownedSkills 
 			return fmt.Errorf("instruction changed during apply")
 		}
 	} else {
-		fresh, _ := classifyInstructionRemoval(paths, ownedInstructions[action.ID], action.Destination)
+		fresh, _ := classifyInstructionRemoval(paths, ownedInstructions[action.ID], action.Destination, jsonKeysDestinations(paths, catalogs)[action.Destination])
 		if fresh != action.Action {
 			return fmt.Errorf("instruction changed during apply")
 		}
@@ -1958,7 +1980,16 @@ type instructionRollback struct {
 
 func mutateInstruction(paths Paths, loaded LoadedManifest, action Action, prior ReceiptManaged, verifiedSource []byte, expected resolvedCollision, hasExpected bool) (instructionRollback, error) {
 	rollback := instructionRollback{destination: action.Destination}
+	if action.Action == "release" {
+		return rollback, nil
+	}
 	if action.Reason == matchesCatalogReason {
+		// Only the receipt moves, so the destination must still hold exactly
+		// the verified catalog bytes.
+		data, _, err := readSafeFile(action.Destination, "managed instruction")
+		if err != nil || !bytes.Equal(data, verifiedSource) {
+			return rollback, fmt.Errorf("instruction changed during apply")
+		}
 		return rollback, nil
 	}
 	if action.Action == "adopt" || action.Action == "replace" {

@@ -5,7 +5,7 @@ All notable changes are documented here. Terran follows semantic versioning.
 ## 0.4.1 - 2026-09-29
 
 - An owned instruction, config, file, or settings key whose destination already matches the catalog plans `update` with the reason `destination already matches catalog; record it`, and apply writes only the receipt. Editing on one machine and syncing the edit into the catalog no longer leaves that machine at `blocked_drift`.
-- New `opencode-settings` json-keys target for `opencode.json`, so Terran owns chosen top-level keys while Naru and per-machine entries (`agents`, `plugins`, `skills`, `mcp`) stay untouched. It cannot be combined with `opencode-config`.
+- New `opencode-settings` json-keys target for `opencode.json`, so Terran owns chosen top-level keys while Naru and per-machine entries (`agents`, `plugins`, `skills`, `mcp`) stay untouched. It cannot be combined with `opencode-config`; a machine that owns the whole-file `opencode-config` plans `release` for it when its catalog switches to `opencode-settings`, keeping the file.
 - Default catalog: sync the global Claude and OpenCode instructions from cc1; replace the whole-file `opencode-config` with `opencode-settings` (`$schema`, `agent`, `command`, `default_agent`, `experimental`, `permission`, `providers`, `shell`); drop the obsolete `naru-runtime` config (Naru 0.11 no longer uses it).
 
 ## 0.4.0 - 2026-09-29

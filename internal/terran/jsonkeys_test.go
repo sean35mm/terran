@@ -198,8 +198,6 @@ func TestJSONKeysLifecycleKeepsUnownedKeys(t *testing.T) {
 	}
 }
 
-// The receipt is written indented; an adopted object value must still compare
-// equal to its applied hash so removal releases it instead of restoring.
 func TestJSONKeysSyncedEditRecordsReceiptOnly(t *testing.T) {
 	home, repo := fileEnvironment(t)
 	settings := claudeSettings(t, home, `{"theme":"dark"}`, 0o600)
@@ -275,6 +273,48 @@ func TestJSONKeysOpenCodeSettingsTarget(t *testing.T) {
 	}
 }
 
+func TestOpenCodeConfigToSettingsKeysReleasesWholeFile(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	writeCatalogWithConfigs(t, repo, nil, []Config{{Target: "opencode-config", Source: "config/opencode.json"}})
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(home, "config", "opencode", "opencode.json")
+	// Naru adds its own key after the whole-file apply.
+	current := decodedJSON(t, config)
+	current["agents"] = map[string]any{"naru": map[string]any{"mode": "primary"}}
+	data, _ := json.Marshal(current)
+	if err := os.WriteFile(config, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"opencode-settings": `{"default_agent":"naru","shell":"zsh"}`})
+	plan, err := Plan("all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action := actionByIDOrFail(t, plan, "config/opencode-config"); action.Action != "release" {
+		t.Fatalf("whole-file config not released: %#v", action)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	after := decodedJSON(t, config)
+	if after["shell"] != "zsh" || after["default_agent"] != "naru" || !reflect.DeepEqual(after["agents"], current["agents"]) {
+		t.Fatalf("opencode.json after release: %#v", after)
+	}
+	if receipt := loadTestReceipt(t); len(receipt.Managed) != 0 || len(receipt.JSONKeys) != 2 {
+		t.Fatalf("receipt after release: %#v", receipt)
+	}
+	if plan, _ := Plan("all"); !plan.Clean {
+		t.Fatalf("plan after release: %#v", plan)
+	}
+}
+
+// The receipt is written indented; an adopted object value must still compare
+// equal to its applied hash so removal releases it instead of restoring.
 func TestJSONKeysAdoptedObjectValueReleases(t *testing.T) {
 	home, repo := fileEnvironment(t)
 	claudeSettings(t, home, `{"a":{"b":[1,2],"c":"<x>"}}`, 0o644)

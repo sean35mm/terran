@@ -346,6 +346,18 @@ func TestInstructionCreateUpdateNoopDriftAndFiltering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A destination that changes after the plan is not recorded as matching.
+	if _, err := ApplyWithOptions("claude", "test", ApplyOptions{ConfirmPlan: func(PlanResult) error {
+		return os.WriteFile(destination, []byte("# changed\n"), 0o644)
+	}}); err == nil {
+		t.Fatal("changed destination was recorded as matching the catalog")
+	}
+	if err := os.WriteFile(destination, []byte("external edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if edited, err = os.Stat(destination); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := Apply("claude", "test"); err != nil {
 		t.Fatal(err)
 	}

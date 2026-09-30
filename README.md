@@ -486,7 +486,9 @@ manifests are still read and upgraded in memory):
   source is a sanitized JSON object holding only the keys Terran owns.
   `opencode-settings` and `opencode-config` share `opencode.json`, so a catalog
   set may declare only one of them. Use `opencode-settings` when a tool such as
-  Naru also writes that file.
+  Naru also writes that file. A machine that owned `opencode-config` plans
+  `release` for it after the switch: Terran keeps the file and stops owning it
+  as a whole.
 - `tools`: names matching `^[a-z0-9][a-z0-9._-]{0,63}$`.
 - Any entry may carry `platforms` (`darwin`, `linux`). Without it the entry
   applies everywhere; on another platform it plans as `excluded`. Adding
