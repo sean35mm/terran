@@ -1112,6 +1112,129 @@ func TestHeldOwnedInstructionRemovedFromCatalogStaysUntouched(t *testing.T) {
 	}
 }
 
+func TestForgetHeldItemRemovedFromCatalogKeepsDestinationAndBackup(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global")
+	prepareInstructionParents(t)
+	paths, _ := ResolvePaths()
+	destination, _ := instructionDestination(paths, "claude-global")
+	_ = os.WriteFile(destination, []byte("# claude-global\n"), 0o640)
+	_, _, _ = Enroll(repo, "test", "", false)
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Hold("instruction/claude-global"); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogWithInstructions(t, repo, nil, nil)
+	backup := instructionBackup(paths, "claude-global")
+	before := snapshotManagedDestination(t, destination)
+	backupBefore := snapshotManagedDestination(t, backup)
+	result, err := Forget("instruction/claude-global")
+	if err != nil || !result.Receipt || !result.Held || result.Backup != backup {
+		t.Fatalf("forget: %#v %v", result, err)
+	}
+	assertManagedDestinationUnchanged(t, destination, before, snapshotManagedDestination(t, destination))
+	assertManagedDestinationUnchanged(t, backup, backupBefore, snapshotManagedDestination(t, backup))
+	if enrollment, _ := LoadEnrollment(paths); len(enrollment.Holds) != 0 {
+		t.Fatalf("hold kept: %#v", enrollment.Holds)
+	}
+	if receipt := loadTestReceipt(t); len(receipt.Managed) != 0 {
+		t.Fatalf("receipt entry kept: %#v", receipt.Managed)
+	}
+	if plan := mustPlan(t, "all"); !plan.Clean || len(plan.Actions) != 0 {
+		t.Fatalf("plan after forget: %#v", plan)
+	}
+	for _, id := range []string{"instruction/claude-global", "skill/agents/never"} {
+		if _, err := Forget(id); !hasCode(err, CodeUnknownItem) {
+			t.Fatalf("forget %s: %v", id, err)
+		}
+	}
+	if _, err := Forget("instruction/../x"); !hasCode(err, CodeUsage) {
+		t.Fatalf("malformed id: %v", err)
+	}
+}
+
+func TestForgetDriftedInstructionThenDecideReplace(t *testing.T) {
+	_, repo := instructionEnvironment(t, "claude-global")
+	prepareInstructionParents(t)
+	paths, _ := ResolvePaths()
+	destination, _ := instructionDestination(paths, "claude-global")
+	_, _, _ = Enroll(repo, "test", "", false)
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	drifted := []byte("edited here\n")
+	_ = os.WriteFile(destination, drifted, 0o644)
+	if action := actionByIDOrFail(t, mustPlan(t, "all"), "instruction/claude-global"); action.Action != "blocked_drift" {
+		t.Fatalf("drift: %#v", action)
+	}
+	before := snapshotManagedDestination(t, destination)
+	if result, err := Forget("instruction/claude-global"); err != nil || !result.Receipt || result.Held || result.Backup != "" {
+		t.Fatalf("forget: %#v %v", result, err)
+	}
+	assertManagedDestinationUnchanged(t, destination, before, snapshotManagedDestination(t, destination))
+	plan := mustPlan(t, "all")
+	if action := actionByIDOrFail(t, plan, "instruction/claude-global"); action.Action != "blocked_collision" {
+		t.Fatalf("after forget: %#v", action)
+	}
+	if _, err := ApplyWithOptions("all", "test", ApplyOptions{ExpectDigest: plan.Digest, Decisions: map[string]CollisionDecision{"instruction/claude-global": CollisionReplace}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(destination); string(got) != "# claude-global\n" {
+		t.Fatalf("destination: %q", got)
+	}
+	if got, _ := os.ReadFile(instructionBackup(paths, "claude-global")); !bytes.Equal(got, drifted) {
+		t.Fatalf("backup: %q", got)
+	}
+	if plan := mustPlan(t, "all"); !plan.Clean {
+		t.Fatalf("plan after replace: %#v", plan)
+	}
+}
+
+func TestForgetOwnedSkillAndJSONKeyAdoptsIdenticalContent(t *testing.T) {
+	home, repo := fileEnvironment(t)
+	writeCatalog(t, repo, []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents"}}})
+	settings := claudeSettings(t, home, `{"theme":"dark"}`, 0o644)
+	writeJSONKeysCatalog(t, repo, "test-catalog", nil, map[string]string{"claude-settings": `{"model":"opus"}`})
+	manifest := Manifest{SchemaVersion: SchemaVersion, ID: "test-catalog", Version: "0.1.0", Projections: []Projection{{Skill: "example", Source: "skills/example", Targets: []string{"agents"}}}, JSONKeys: []JSONKeysItem{{Target: "claude-settings", Source: "settings/claude-settings.json"}}}
+	data, _ := json.MarshalIndent(manifest, "", "  ")
+	if err := os.WriteFile(filepath.Join(repo, "terran.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply("all", "test"); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := ResolvePaths()
+	skill, _ := skillDestination(paths, "agents", "example")
+	skillInfo, _ := os.Lstat(skill)
+	skillHash, _ := skillTreeHash(skill)
+	settingsBefore := snapshotManagedDestination(t, settings)
+	for _, id := range []string{"skill/agents/example", "json-keys/claude-settings/model"} {
+		if result, err := Forget(id); err != nil || !result.Receipt || result.Held {
+			t.Fatalf("forget %s: %#v %v", id, result, err)
+		}
+	}
+	if info, err := os.Lstat(skill); err != nil || !os.SameFile(info, skillInfo) {
+		t.Fatalf("skill directory replaced: %v", err)
+	}
+	if hash, err := skillTreeHash(skill); err != nil || hash != skillHash {
+		t.Fatalf("skill content changed: %v", err)
+	}
+	assertManagedDestinationUnchanged(t, settings, settingsBefore, snapshotManagedDestination(t, settings))
+	if receipt := loadTestReceipt(t); len(receipt.Projections) != 0 || len(receipt.JSONKeys) != 0 {
+		t.Fatalf("receipt: %#v", receipt)
+	}
+	plan := mustPlan(t, "all")
+	for _, id := range []string{"skill/agents/example", "json-keys/claude-settings/model"} {
+		if action := actionByIDOrFail(t, plan, id); action.Action != "adopt" {
+			t.Fatalf("%s after forget: %#v", id, action)
+		}
+	}
+}
+
 func fileEnvironment(t *testing.T) (string, string) {
 	t.Helper()
 	base := t.TempDir()

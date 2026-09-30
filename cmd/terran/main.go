@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/sean35mm/terran/internal/terran"
@@ -116,8 +117,8 @@ func runWithIO(args []string, stdout, stderr io.Writer) int {
 		return runProjectionCommand(args[0], args[1:], stdout, stderr)
 	case "capture":
 		return runCaptureCommand(args[1:], stdout, stderr)
-	case "hold", "unhold":
-		return runHoldCommand(args[0], args[1:], stdout, stderr)
+	case "hold", "unhold", "forget":
+		return runItemCommand(args[0], args[1:], stdout, stderr)
 	case "doctor":
 		if commandHelpRequested(args[1:]) {
 			printCommandHelp(stdout, "doctor")
@@ -275,7 +276,7 @@ func runCaptureCommand(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runHoldCommand(command string, args []string, stdout, stderr io.Writer) int {
+func runItemCommand(command string, args []string, stdout, stderr io.Writer) int {
 	if commandHelpRequested(args) {
 		printCommandHelp(stdout, command)
 		return 0
@@ -297,6 +298,9 @@ func runHoldCommand(command string, args []string, stdout, stderr io.Writer) int
 	}
 	if id == "" {
 		return usage(stdout, stderr, "expected exactly one item id", options.json)
+	}
+	if command == "forget" {
+		return runForget(id, options.json, stdout, stderr)
 	}
 	change := terran.Hold
 	if command == "unhold" {
@@ -322,6 +326,37 @@ func runHoldCommand(command string, args []string, stdout, stderr io.Writer) int
 		}
 	} else {
 		fmt.Fprintf(stdout, "%s %s. Held items: %d.\n", map[string]string{"hold": "Held", "unhold": "Released"}[command], id, len(enrollment.Holds))
+	}
+	return 0
+}
+
+func runForget(id string, jsonOutput bool, stdout, stderr io.Writer) int {
+	result, err := terran.Forget(id)
+	if err != nil {
+		if code, _ := terran.ErrorCode(err); code == terran.CodeUsage {
+			return usage(stdout, stderr, err.Error(), jsonOutput)
+		}
+		if jsonOutput {
+			return jsonOperational(stdout, stderr, "forget failed", err)
+		}
+		return operational(stderr, err)
+	}
+	if jsonOutput {
+		if err := writeJSON(stdout, result); err != nil {
+			return operational(stderr, fmt.Errorf("write output: %w", err))
+		}
+		return 0
+	}
+	var dropped []string
+	if result.Receipt {
+		dropped = append(dropped, "receipt entry")
+	}
+	if result.Held {
+		dropped = append(dropped, "hold")
+	}
+	fmt.Fprintf(stdout, "Forgot %s (%s); the destination was left as is.\n", id, strings.Join(dropped, " and "))
+	if result.Backup != "" {
+		fmt.Fprintf(stdout, "Backup kept at %s. Inspect it: it can block adopting or replacing this item until it is moved out of Terran's state.\n", result.Backup)
 	}
 	return 0
 }
@@ -444,13 +479,10 @@ func printError(stderr io.Writer, err error) {
 	}
 }
 
-func knownCommand(command string) bool {
-	switch command {
-	case "enroll", "plan", "apply", "status", "capture", "hold", "unhold", "doctor", "version":
-		return true
-	}
-	return false
-}
+// commands lists every subcommand with its own help and flag set.
+var commands = []string{"enroll", "plan", "apply", "status", "capture", "hold", "unhold", "forget", "doctor", "version"}
+
+func knownCommand(command string) bool { return slices.Contains(commands, command) }
 
 func printHelp(w io.Writer) {
 	fmt.Fprintln(w, `Terran manages local skills, global instructions, and fixed global configs on a Command Center.
@@ -469,6 +501,7 @@ Advanced and automation:
   terran capture          List unmanaged agent setup on this machine
   terran hold             Pin one item on this machine so apply leaves it alone
   terran unhold           Release a held item
+  terran forget           Drop Terran's record of one item; the destination stays
   terran version          Print build metadata
 
 Run terran help COMMAND for flags and exit codes. Commands support stable
@@ -491,6 +524,7 @@ func printCommandIntro(w io.Writer, command string) {
 		"capture": "Usage: terran capture [--target " + targets + "] [--json]\nRead-only. Lists entries in skill and file directories, whole-file targets, and top-level settings keys that Terran does not own, as ITEM_ID KIND lines (values are never printed). Skips hidden, naru- prefixed, held, and already owned entries. Exit: 0 success, 1 operational failure (including not_enrolled), 2 usage.\n\nFlags:",
 		"hold":    "Usage: terran hold ITEM_ID [--json]\nMutates private enrollment state only. Pins an item id from terran plan --json so plan and apply never inspect or change it. Exit: 0 success, 1 operational failure (including unknown_item), 2 usage.\n\nFlags:",
 		"unhold":  "Usage: terran unhold ITEM_ID [--json]\nMutates private enrollment state only. Releases a held item; releasing an item that is not held succeeds. Exit: 0 success, 1 operational failure, 2 usage.\n\nFlags:",
+		"forget":  "Usage: terran forget ITEM_ID [--json]\nMutates private state only. Drops Terran's record of one item (its receipt entry and its hold) so a stale hold or record stops mattering; the destination is left as is; the next plan treats it as unowned (adopt if identical, blocked_collision otherwise, so `apply --decide ID=replace` installs the catalog version over drift). Backups are never deleted; a backup the dropped entry referenced is reported, and it can block adopting or replacing the item until it is moved. The original value recorded for a replaced settings key is discarded. Exit: 0 success, 1 operational failure (including unknown_item), 2 usage.\n\nFlags:",
 		"doctor":  "Usage: terran doctor [--json]\nRead-only diagnostics. Exit: 0 healthy, 1 unhealthy or output failure, 2 usage.\n\nFlags:",
 	}
 	fmt.Fprintln(w, lines[command])

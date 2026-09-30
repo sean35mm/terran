@@ -214,7 +214,16 @@ func Doctor(buildVersion string) DoctorResult {
 	}
 	executable, executableErr := os.Executable()
 	pathExecutable, pathErr := exec.LookPath("terran")
-	if executableErr != nil || pathErr != nil {
+	installed := filepath.Join(paths.Home, ".local", "bin", "terran")
+	if pathErr != nil {
+		if _, err := os.Stat(installed); err == nil {
+			add("binary_path", "warn", "terran is installed at "+installed+"; only this shell's PATH lacks it (non-interactive SSH often has a shorter PATH; fleet commands call that path directly)")
+		} else if executableErr == nil {
+			add("binary_path", "warn", "terran runs from "+executable+" but is not on this shell's PATH, and "+installed+" does not exist; fleet commands call that path")
+		} else {
+			add("binary_path", "warn", "terran is not discoverable on PATH")
+		}
+	} else if executableErr != nil {
 		add("binary_path", "warn", "terran is not discoverable on PATH")
 	} else {
 		executable, _ = filepath.EvalSymlinks(executable)

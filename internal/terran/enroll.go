@@ -96,6 +96,95 @@ func holdLocked(paths Paths, enrollment Enrollment, id string, hold bool) (Enrol
 	return writeEnrollment(paths, result)
 }
 
+// ForgetResult reports which records Forget dropped for one item.
+type ForgetResult struct {
+	SchemaVersion int    `json:"schema_version"`
+	ID            string `json:"id"`
+	Receipt       bool   `json:"receipt"`
+	Held          bool   `json:"held"`
+	// Backup is the private backup the dropped receipt entry referenced; it is
+	// kept, and while it exists it can block adopting or replacing the item.
+	Backup string `json:"backup,omitempty"`
+}
+
+// Forget drops Terran's receipt entry and hold for one item without touching
+// its destination or any backup; the next plan treats the item as unowned.
+func Forget(id string) (ForgetResult, error) {
+	if _, _, _, err := ParseItemID(id); err != nil {
+		return ForgetResult{}, Coded(CodeUsage, "", err)
+	}
+	paths, err := ResolvePaths()
+	if err != nil {
+		return ForgetResult{}, err
+	}
+	result := ForgetResult{SchemaVersion: SchemaVersion, ID: id}
+	err = withLock(paths.Lock, func() error {
+		enrollment, err := LoadEnrollment(paths)
+		if err != nil {
+			return err
+		}
+		receipt, err := LoadReceipt(paths, enrollment)
+		if errors.Is(err, os.ErrNotExist) {
+			receipt = Receipt{}
+		} else if err != nil {
+			return fmt.Errorf("load receipt: %w", err)
+		} else if receipt.RepositoryID != enrollment.RepositoryID || receipt.RepositoryPath != enrollment.RepositoryPath {
+			return Coded(CodeRepositoryMismatch, nextEnroll, fmt.Errorf("receipt repository differs from enrollment"))
+		}
+		kept := receipt
+		kept.Projections, kept.Managed, kept.JSONKeys = nil, nil, nil
+		for _, entry := range receipt.Projections {
+			if ItemID("skill", entry.Target, entry.Skill) == id {
+				result.Receipt = true
+			} else {
+				kept.Projections = append(kept.Projections, entry)
+			}
+		}
+		for _, entry := range receipt.Managed {
+			if ItemID(entry.Kind, entry.Target, entry.Name) == id {
+				result.Receipt, result.Backup = true, entry.Backup
+			} else {
+				kept.Managed = append(kept.Managed, entry)
+			}
+		}
+		for _, entry := range receipt.JSONKeys {
+			if ItemID("json-keys", entry.Target, entry.Key) == id {
+				result.Receipt = true
+			} else {
+				kept.JSONKeys = append(kept.JSONKeys, entry)
+			}
+		}
+		index := sort.SearchStrings(enrollment.Holds, id)
+		result.Held = index < len(enrollment.Holds) && enrollment.Holds[index] == id
+		if !result.Receipt && !result.Held {
+			return Coded(CodeUnknownItem, "run terran plan --json to list item ids; forget only drops receipt-owned or held items", fmt.Errorf("unknown item %q", id))
+		}
+		if result.Receipt {
+			data, err := marshalJSON(kept)
+			if err != nil {
+				return err
+			}
+			writeResult, writeErr := atomicPrivateJSONBytes(paths.Receipt, data, nil)
+			if writeErr != nil {
+				installed, _, verifyErr := readTrustedFile(paths.Receipt, "installed receipt", 4<<20, 0o600)
+				if !writeResult.renamed || verifyErr != nil || !bytes.Equal(installed, data) {
+					return writeErr
+				}
+			}
+		}
+		if result.Held {
+			if _, err := holdLocked(paths, enrollment, id, false); err != nil {
+				if result.Receipt {
+					return Coded(CodePartialApply, "run terran unhold "+id, fmt.Errorf("receipt entry for %s was dropped but its hold was not released: %w", id, err))
+				}
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
 // writeEnrollment rewrites the enrollment config, typically with changed
 // holds; the caller holds the Terran lock and has validated every hold id.
 func writeEnrollment(paths Paths, result Enrollment) (Enrollment, error) {

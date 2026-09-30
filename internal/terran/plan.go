@@ -515,7 +515,9 @@ func actionSourceHash(catalogs Catalogs, action Action) (string, bool) {
 
 // contentHash identifies what currently occupies a destination without
 // following symlinks: a file's bytes, a link's target, or a directory's sorted
-// relative paths, modes, and link targets.
+// relative paths, modes, link targets, and regular file hashes. A directory
+// walk stops after skillEntryLimit entries and hashes at most skillByteLimit
+// bytes of file content; a file past that budget contributes only its size.
 func contentHash(path string) string {
 	info, err := os.Lstat(path)
 	switch {
@@ -534,8 +536,13 @@ func contentHash(path string) string {
 		return hashBytes([]byte("mode " + info.Mode().String()))
 	}
 	var listing strings.Builder
+	entries, budget := 0, int64(skillByteLimit)
 	_ = filepath.WalkDir(path, func(current string, entry os.DirEntry, err error) error {
 		relative, _ := filepath.Rel(path, current)
+		if entries++; entries > skillEntryLimit {
+			listing.WriteString("truncated\n")
+			return filepath.SkipAll
+		}
 		if err != nil {
 			fmt.Fprintf(&listing, "%s error\n", relative)
 			return nil
@@ -545,11 +552,18 @@ func contentHash(path string) string {
 			fmt.Fprintf(&listing, "%s error\n", relative)
 			return nil
 		}
-		link := ""
+		content := ""
 		if info.Mode()&os.ModeSymlink != 0 {
-			link, _ = os.Readlink(current)
+			content, _ = os.Readlink(current)
+		} else if info.Mode().IsRegular() && info.Size() > budget {
+			content = fmt.Sprintf("size %d", info.Size())
+		} else if info.Mode().IsRegular() {
+			budget -= info.Size()
+			if content, err = fileHash(current); err != nil {
+				content = "error"
+			}
 		}
-		fmt.Fprintf(&listing, "%q %s %q\n", relative, info.Mode(), link)
+		fmt.Fprintf(&listing, "%q %s %q\n", relative, info.Mode(), content)
 		return nil
 	})
 	return hashBytes([]byte(listing.String()))

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -93,8 +95,9 @@ func TestBareTerranShowsHelpWhenNotEnrolledAndFleetWhenEnrolled(t *testing.T) {
 }
 
 func TestFleetTableRendersMixedRows(t *testing.T) {
+	two, one, zero := 2, 1, 0
 	rows := []terran.MachineSummary{
-		{Name: "cc1", Platform: "darwin", Local: true, Reachable: true, TerranVersion: "0.4.0", CatalogCommit: "5aeb5d4", OverlayCommit: "1c2d3e4", Clean: true, Healthy: true, Held: 5},
+		{Name: "cc1", Platform: "darwin", Local: true, Reachable: true, TerranVersion: "0.4.0", CatalogCommit: "5aeb5d4", OverlayCommit: "1c2d3e4", Clean: true, Healthy: true, Held: 5, CatalogDirty: &two, CatalogAhead: &zero, CatalogBehind: &zero, OverlayDirty: &zero, OverlayBehind: &one},
 		{Name: "cc2", Platform: "linux", Reachable: true, TerranVersion: "0.4.0", CatalogCommit: "5aeb5d4", OverlayCommit: "1c2d3e4", Drifted: 2},
 		{Name: "cc3", Platform: "linux", Error: "offline"},
 		{Name: "cc4", Platform: "linux", Reachable: true, TerranVersion: "0.4.0", Blocked: 1, Drifted: 1},
@@ -106,7 +109,7 @@ func TestFleetTableRendersMixedRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "CC    PLATFORM  TERRAN  CATALOG  OVERLAY  STATE\n" +
-		"cc1*  darwin    0.4.0   5aeb5d4  1c2d3e4  clean (5 held)\n" +
+		"cc1*  darwin    0.4.0   5aeb5d4  1c2d3e4  clean (5 held), catalog 2 uncommitted, overlay 1 behind\n" +
 		"cc2   linux     0.4.0   5aeb5d4  1c2d3e4  drift: 2\n" +
 		"cc3   linux     -       -        -        offline\n" +
 		"cc4   linux     0.4.0   -        -        blocked: 1\n" +
@@ -432,6 +435,13 @@ func TestCLIHoldAndUnhold(t *testing.T) {
 		{[]string{"hold", "a", "b"}, 2, ""},
 		{[]string{"hold", "--help"}, 0, "Usage: terran hold"},
 		{[]string{"hold", "instruction/other", "--json"}, 1, ""},
+		{[]string{"hold", "instruction/claude-global"}, 0, ""},
+		{[]string{"forget", "instruction/claude-global", "--json"}, 0, `{"schema_version":2,"id":"instruction/claude-global","receipt":false,"held":true}`},
+		{[]string{"forget", "instruction/claude-global", "--json"}, 1, `"code":"unknown_item"`},
+		{[]string{"forget", "not-an-id", "--json"}, 2, `"code":"usage"`},
+		{[]string{"forget", "--help"}, 0, "Usage: terran forget"},
+		{[]string{"hold", "instruction/claude-global"}, 0, ""},
+		{[]string{"forget", "instruction/claude-global"}, 0, "Forgot instruction/claude-global (hold); the destination was left as is."},
 	}
 	for _, tc := range cases {
 		var out, errOut bytes.Buffer
@@ -534,4 +544,118 @@ func TestCLIApplyDecideAndExpect(t *testing.T) {
 	if got, _ := os.ReadFile(destination); !bytes.Contains(got, []byte("naru")) {
 		t.Fatalf("catalog config not installed: %q", got)
 	}
+}
+
+// TestDocumentedCommandsExist checks every `terran COMMAND --flag` in code
+// spans and fenced blocks of the README and skills against the CLI's own
+// command table and flag sets.
+func TestDocumentedCommandsExist(t *testing.T) {
+	files, err := filepath.Glob("../../skills/*/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	references, _ := filepath.Glob("../../skills/*/references/*.md")
+	files = append(append(files, references...), "../../README.md")
+	for segment, want := range map[string]int{
+		"terran plan --json | jq .":                                  0,
+		"ssh cc2 '.local/bin/terran status --summary --json'":        0,
+		"terran apply [--decide ITEM_ID=replace|keep]... --expect D": 0,
+		"terran frobnicate":                                          1,
+		"~/.local/bin/terran hold --target all":                      1,
+		"terran --verbose":                                           1,
+	} {
+		if got := documentedCommandProblems(segment); len(got) != want {
+			t.Fatalf("%q: problems %q, want %d", segment, got, want)
+		}
+	}
+	span := regexp.MustCompile("`([^`]+)`")
+	checked := 0
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fenced := false
+		for n, line := range strings.Split(string(data), "\n") {
+			if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+				fenced = !fenced
+				continue
+			}
+			segments := []string{line}
+			if !fenced {
+				segments = nil
+				for _, match := range span.FindAllStringSubmatch(line, -1) {
+					segments = append(segments, match[1])
+				}
+			}
+			for _, segment := range segments {
+				for _, problem := range documentedCommandProblems(segment) {
+					t.Errorf("%s:%d: %s in %q", strings.TrimPrefix(file, "../../"), n+1, problem, segment)
+				}
+				checked++
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no code found in the README or skills")
+	}
+}
+
+// documentedCommandProblems reports unknown commands and flags in one shell
+// snippet. A command is the token after `terran` or a path ending in
+// .local/bin/terran; its flags run until a shell separator.
+// A command separated from `terran` by two or more spaces is a description
+// column, as in the README command reference.
+func documentedCommandProblems(segment string) []string {
+	switch segment {
+	case "terran not found", "terran cc":
+		return nil // a fleet STATE value, and a wrapper the docs say does not exist
+	}
+	var problems []string
+	clean := func(token string) string { return strings.Trim(token, `'"()[],.;:…`) }
+	positions := regexp.MustCompile(`\S+`).FindAllStringIndex(segment, -1)
+	tokens := make([]string, len(positions))
+	for i, position := range positions {
+		tokens[i] = segment[position[0]:position[1]]
+	}
+	for i, token := range tokens {
+		token = strings.TrimLeft(token, `'"($`)
+		if token != "terran" && !strings.HasSuffix(token, ".local/bin/terran") {
+			continue
+		}
+		if i+1 == len(tokens) || positions[i+1][0]-positions[i][1] > 1 {
+			continue
+		}
+		command := clean(tokens[i+1])
+		var flags *flag.FlagSet
+		switch {
+		case command == "" || strings.HasPrefix(command, "<") || strings.ToUpper(command) == command:
+			continue // a placeholder such as <args> or COMMAND
+		case strings.HasPrefix(command, "-"):
+			if command != "--help" && command != "-h" && command != "--version" {
+				problems = append(problems, "unknown root flag "+command)
+			}
+			continue
+		case command == "help":
+			flags = flag.NewFlagSet("help", flag.ContinueOnError)
+		case knownCommand(command):
+			flags, _ = newFlags(command, io.Discard)
+		default:
+			problems = append(problems, "unknown command "+command)
+			continue
+		}
+		for _, next := range tokens[i+2:] {
+			if next == "|" || next == "||" || next == "&&" || next == ";" || strings.HasPrefix(next, "#") || strings.HasPrefix(next, ">") || strings.HasPrefix(next, "2>") {
+				break
+			}
+			if !strings.HasPrefix(next, "-") && !strings.HasPrefix(next, "[-") {
+				continue
+			}
+			name, _, _ := strings.Cut(strings.TrimLeft(clean(next), "-"), "=")
+			if name != "" && name != "h" && name != "help" && flags.Lookup(name) == nil {
+				problems = append(problems, "terran "+command+" has no flag --"+name)
+			}
+		}
+	}
+	return problems
 }
