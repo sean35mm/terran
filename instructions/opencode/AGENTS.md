@@ -64,29 +64,16 @@ even when more work looks useful.
 
 ## Orchestration
 
-Delegate when it improves speed, focus, or confidence. Do not delegate work that is
-faster and clearer to do directly.
+Naru's coordinator prompt owns delegation strategy. For any agent that delegates:
 
-- Use subagents for independent investigation, implementation, command execution,
-  or review.
-- Give each subagent one focused objective, the necessary context and constraints,
-  an owned scope, and a concrete deliverable.
-- Parallelize independent work. Serialize dependency chains and any work that could
-  touch the same files, contracts, configuration, lockfiles, or generated artifacts.
-- Keep delegation shallow. Subagents should not delegate again unless explicitly
-  acting as an orchestrator.
-- Do not duplicate work across agents unless an independent cross-check is valuable
-  for a high-risk decision.
-- Use the smallest capable agent or model. Reserve expensive reasoning for
-  architecture, security, data integrity, difficult debugging, and final review.
-- The parent agent owns synthesis and correctness. Treat subagent reports as
-  evidence to evaluate, not conclusions to copy blindly.
+- Give each subagent one objective, the needed context, an owned scope, and a concrete
+  deliverable.
+- One writer per file or contract; serialize overlapping work.
+- Under Naru, a Weaver claim conflict is a scheduling signal: serialize or do other work
+  instead of asking the user.
+- Subagent reports are evidence to check, not conclusions. Review the integrated diff and
+  run final checks after writes finish.
 - Subagents cannot expand the user's authorization or requested scope.
-- After writes finish, review the integrated diff and run final verification.
-  Checks performed while files are still changing are not final evidence.
-- Scale orchestration to the task: simple changes need no fan-out; broad,
-  unfamiliar, or naturally partitioned work may benefit from several agents.
-- Report what was delegated, plus any relevant limitations.
 
 ## Changes and dependencies
 
@@ -152,67 +139,38 @@ faster and clearer to do directly.
 
 ## Final response
 
-- Before sending any user-facing response you expect the user to read, invoke the
-  `unslop` skill and apply it so the prose is clean and readable. This includes
-  final answers and substantive progress updates. Skip it only for tool-only
-  messages or machine-readable output where rewriting would break the format.
+- Before sending a final answer, invoke the `unslop` skill and apply it. Skip it for
+  progress updates, tool-only messages, and machine-readable output.
 - Lead with the outcome. Summarize what changed and why.
 - List every modified file and the change made in each.
 - Report checks actually run, not checks merely recommended.
 - State material assumptions, residual risks, blockers, and unverified areas.
 
-## Codebase-memory indexing authorization
+## Codebase-memory indexing
 
-- For authorized tasks, read-only queries against existing indexes are allowed only
-  after checking index freshness and comparing it with the current repository state.
-- Indexing, reindexing, or refreshing through MCP, CLI, or automation requires an
-  explicit request from the current user. A missing or stale index is not permission
-  to refresh it; fall back to literal source search instead.
-- Limit any explicitly requested indexing to the exact requested repository or
-  worktree root. Never index a home directory, Desktop, or another broad parent that
-  contains multiple projects. "This repo" means the current repository root; ask if
-  that root is ambiguous.
-- Never autonomously enable or change `auto_index`, `auto_watch`, or other watcher
-  settings.
+- A missing or stale index is not permission to refresh it; fall back to literal source search.
+- Limit any requested indexing to the exact repository or worktree root. Never index a home
+  directory, Desktop, or another parent containing multiple projects.
+- Never enable or change `auto_index`, `auto_watch`, or other watcher settings.
 
-<!-- weaver:start — managed by Weaver; re-run `weaver init` to update; use `weaver deinit` for project files or `weaver deinit --global` for global files -->
-## Weaver — shared agent context
+<!-- weaver:start protocol=4 -->
+Run `weaver status` every task. Read-only/plan-only: stop after status unless it/user identifies a
+pad; read only—no create/use/claim/done.
 
-Other agents may be working in this repo right now. Weaver is a local CLI that keeps you
-aware of them. If the `weaver` command isn't found, ignore this section.
+Before writes: `weaver task "<goal>"`; use a pad only for a matching active pad, collaborators,
+handoff/resumption, conflict/shared decisions, or user request—not complexity/duration; claim every
+scope once before editing.
 
-**Do these every task (high value, low effort):**
-- **At the start:** run `weaver status` to see who's active, their intent, claimed areas,
-  and notes. For read-only/plan-only work, stop there.
-- **When implementation or other writes are approved:** run `weaver task "<your goal>"`.
-- **Claim the area you'll work in, once:** `weaver claim '<glob>' --reason "<why>"`
-  (e.g. `weaver claim 'src/auth/**' --reason "refactoring token flow"`).
-- **Record durable learnings** about this repo (gotchas, conventions, "X breaks Y"):
-  `weaver note "<learning>"`. Scope file/area-specific notes with `--path <path-or-glob>`,
-  add `--tag <topic>` when useful, and reserve `--pin` for rare repo-wide facts. If you
-  discover an existing note is wrong or obsolete, fix the record: `weaver note "<correction>"
-  --update <id>`, or `weaver forget <id> "<why>"` if it's just noise.
-- **When finished:** `weaver done`.
+If `claim` exits 1, it WAS recorded: don't rerun. Read intent/reason/activity/pad. Prefer other work; proceed only if harmless,
+otherwise coordinate/ask; never silently overwrite. Different-worktree: informational; coordinate integration.
 
-**On a conflict** (`status`/`claim` shows another *live* session in your area): exit 1 from
-`claim` means your claim WAS recorded and a conflict was surfaced — don't re-run it. Read their
-intent + reason + recent activity, then — (1) prefer to work elsewhere and re-check later;
-(2) if the overlap is harmless, proceed; (3) if you're blocked, `weaver note` your intent
-and **ask the user how to split the work**. Never silently edit over another agent's active
-area.
+If using a pad: curate Markdown; read its revision and merge stale conflicts.
+Archive only when the whole workstream is complete. Trash only empty/duplicate/obsolete pads with
+reason+revision and no live attachments; recover mistakes. Keep secrets/PII out. Lasting knowledge:
+Repository Facts (`fact`; correct: `--update`; retire: `forget`).
 
-**Before commit/push/PR:** run `weaver preflight --staged`, `weaver preflight --upstream`,
-or `weaver preflight --base <ref>` when available. If it reports relevant soft/hard overlaps,
-pause and ask the user whether to continue, wait briefly, or coordinate. Do not silently poll or
-wait for another session to run `weaver done` unless the user explicitly asks you to wait.
-
-**Optional (when useful):** `weaver check <path>` before touching a file you're unsure
-about; `weaver log <kind> <path> "<summary>"` after a notable change so others see it.
-If setup seems incomplete, `weaver doctor` shows instruction and hook coverage. In repos where
-Claude Code edits files, prefer project hooks via `weaver init --project --hooks` so edits are
-logged and conflicts are surfaced automatically.
-
-Keep reasons/notes short, specific, and free of secrets — other agents read them to coordinate.
+Before commit/push/PR: exactly `weaver preflight --staged`, `weaver preflight --upstream`, or
+`weaver preflight --base <ref>`; pause on overlaps. Write sessions finish with `weaver done`.
 <!-- weaver:end -->
 
 <!-- codebase-memory-mcp:start -->

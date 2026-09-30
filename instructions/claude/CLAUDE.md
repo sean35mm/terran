@@ -17,29 +17,29 @@ Always stop and ask, regardless of size:
 - Destructive or irreversible operations
 - Any database write, including in test helpers and debugging flows
 - Production, billing, or security posture changes
-- New dependencies or CI/CD changes
-- Full test suites or long-running commands
+- New dependencies or CI/CD changes, unless I asked for that specific change
+- Full test suites or long-running commands (targeted checks never need approval)
 
 "plan only" or "investigate" means a written plan, zero file writes, then wait.
 
 ## Agent orchestration
 
-Read-only delegation (Explore/search agents) is fine whenever it keeps your context clean —
-delegate the digging, keep the synthesis and decisions. Agents that edit files, and
-multi-agent workflows, need my explicit request.
+Use subagents for substantive investigation, implementation, testing, and review when they
+help; handle trivial work directly. Subagents may delegate further when useful.
 
-for a subagent, Workflow stage, or delegated task and follow its routing table. Otherwise use
-the harness's available model-selection guidance rather than assuming that skill exists.
-
-When orchestrating:
-
-- One dispatch, one objective, full context in the prompt — subagents can't see our
-  conversation.
-- Split at real boundaries; run independent dispatches in parallel. A one-line fix needs zero
-  agents.
-- One writer per scope — never two agents that could touch the same file.
-- Subagent reports are leads, not proof: verify load-bearing claims and run final checks
-  yourself before claiming done.
+- Default to Claude subagents. Pick the model per task with the Agent tool's `model` parameter:
+  `sonnet` for bounded work, `opus` for ambiguous or high-consequence work. If I name a model,
+  use exactly that one.
+- Use Codex only when I ask, usually for a second opinion or an independent review from an
+  OpenAI model. Load `codex-delegation` only then. Codex reads `AGENTS.md`, not this file, so
+  pass the relevant policies in its prompt.
+- One objective per dispatch, with full context and constraints in the prompt.
+- One writer per checkout; never overlap write scopes. Readers don't final-verify files while a
+  writer is still changing them.
+- Delegation never expands what I authorized. Never silently switch provider or model after a
+  failure or missing capacity; report it and ask.
+- Worker reports are leads, not proof. Inspect the integrated result and run final checks after
+  every writer finishes.
 
 ## Never
 
@@ -47,7 +47,7 @@ When orchestrating:
 - Run SQL that modifies data (`DELETE`, `TRUNCATE`, `DROP`, `UPDATE`, `ALTER`) against any
   database without approval for that exact statement. Never `CASCADE`. Verify which environment
   you're connected to before assuming a database is safe to touch.
-- Push to git. I do every push myself. Committing when asked is fine.
+- Push to git unless I explicitly ask (e.g. "push" or "open a PR"). Committing when asked is fine.
 - Create documentation files unless I ask for them.
 
 If a test failure looks like it's caused by dirty data, propose an isolation or reset plan.
@@ -58,6 +58,8 @@ Don't execute the cleanup.
 - Conventional commits.
 - Keep JSON keys alphabetized — `package.json` especially.
 - When you deliver, list every file you changed and why, and flag any assumptions or risks.
+- Before sending a final answer, invoke the `unslop` skill and apply it. Skip it for progress
+  updates, tool-only messages, and machine-readable output.
 
 ## Tests
 
@@ -75,42 +77,22 @@ This rule outranks any per-project instruction demanding a test for every change
   if you think a high-risk change genuinely warrants it.
 - **writing-plans** and **brainstorming**: present inline. Never save plans or specs to a file.
 
-<!-- weaver:start — managed by Weaver; re-run `weaver init` to update; use `weaver deinit` for project files or `weaver deinit --global` for global files -->
-## Weaver — shared agent context
+<!-- weaver:start protocol=4 -->
+Run `weaver status` every task. Read-only/plan-only: stop after status unless it/user identifies a
+pad; read only—no create/use/claim/done.
 
-Other agents may be working in this repo right now. Weaver is a local CLI that keeps you
-aware of them. If the `weaver` command isn't found, ignore this section.
+Before writes: `weaver task "<goal>"`; use a pad only for a matching active pad, collaborators,
+handoff/resumption, conflict/shared decisions, or user request—not complexity/duration; claim every
+scope once before editing.
 
-**Do these every task (high value, low effort):**
-- **At the start:** run `weaver status` to see who's active, their intent, claimed areas,
-  and notes. For read-only/plan-only work, stop there.
-- **When implementation or other writes are approved:** run `weaver task "<your goal>"`.
-- **Claim the area you'll work in, once:** `weaver claim '<glob>' --reason "<why>"`
-  (e.g. `weaver claim 'src/auth/**' --reason "refactoring token flow"`).
-- **Record durable learnings** about this repo (gotchas, conventions, "X breaks Y"):
-  `weaver note "<learning>"`. Scope file/area-specific notes with `--path <path-or-glob>`,
-  add `--tag <topic>` when useful, and reserve `--pin` for rare repo-wide facts. If you
-  discover an existing note is wrong or obsolete, fix the record: `weaver note "<correction>"
-  --update <id>`, or `weaver forget <id> "<why>"` if it's just noise.
-- **When finished:** `weaver done`.
+If `claim` exits 1, it WAS recorded: don't rerun. Read intent/reason/activity/pad. Prefer other work; proceed only if harmless,
+otherwise coordinate/ask; never silently overwrite. Different-worktree: informational; coordinate integration.
 
-**On a conflict** (`status`/`claim` shows another *live* session in your area): exit 1 from
-`claim` means your claim WAS recorded and a conflict was surfaced — don't re-run it. Read their
-intent + reason + recent activity, then — (1) prefer to work elsewhere and re-check later;
-(2) if the overlap is harmless, proceed; (3) if you're blocked, `weaver note` your intent
-and **ask the user how to split the work**. Never silently edit over another agent's active
-area.
+If using a pad: curate Markdown; read its revision and merge stale conflicts.
+Archive only when the whole workstream is complete. Trash only empty/duplicate/obsolete pads with
+reason+revision and no live attachments; recover mistakes. Keep secrets/PII out. Lasting knowledge:
+Repository Facts (`fact`; correct: `--update`; retire: `forget`).
 
-**Before commit/push/PR:** run `weaver preflight --staged`, `weaver preflight --upstream`,
-or `weaver preflight --base <ref>` when available. If it reports relevant soft/hard overlaps,
-pause and ask the user whether to continue, wait briefly, or coordinate. Do not silently poll or
-wait for another session to run `weaver done` unless the user explicitly asks you to wait.
-
-**Optional (when useful):** `weaver check <path>` before touching a file you're unsure
-about; `weaver log <kind> <path> "<summary>"` after a notable change so others see it.
-If setup seems incomplete, `weaver doctor` shows instruction and hook coverage. In repos where
-Claude Code edits files, prefer project hooks via `weaver init --project --hooks` so edits are
-logged and conflicts are surfaced automatically.
-
-Keep reasons/notes short, specific, and free of secrets — other agents read them to coordinate.
+Before commit/push/PR: exactly `weaver preflight --staged`, `weaver preflight --upstream`, or
+`weaver preflight --base <ref>`; pause on overlaps. Write sessions finish with `weaver done`.
 <!-- weaver:end -->

@@ -6,10 +6,6 @@
     {
       "target": "opencode-config",
       "source": "config/opencode/opencode.json"
-    },
-    {
-      "target": "naru-runtime",
-      "source": "config/opencode/naru-runtime.json"
     }
   ],
   "instructions": [

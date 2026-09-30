@@ -187,7 +187,7 @@ func TestConfigManifestRejectsInvalidEntriesAndCanonicalSourceIsSafe(t *testing.
 			t.Fatal(err)
 		}
 		catalog, err := LoadManifest(root)
-		if err != nil || len(catalog.Manifest.Configs) != 2 {
+		if err != nil || len(catalog.Manifest.Configs) != 1 {
 			t.Fatalf("default catalog config targets: %#v %v", catalog.Manifest.Configs, err)
 		}
 		data, err := os.ReadFile(filepath.Join("..", "..", "config", "opencode", "opencode.json"))
@@ -196,13 +196,6 @@ func TestConfigManifestRejectsInvalidEntriesAndCanonicalSourceIsSafe(t *testing.
 		}
 		if err := validateOpenCodeConfig(data); err != nil {
 			t.Fatalf("canonical config is unsafe: %v", err)
-		}
-		runtime, err := os.ReadFile(filepath.Join("..", "..", "config", "opencode", "naru-runtime.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := validateOpenCodeConfig(runtime); err != nil {
-			t.Fatalf("canonical Naru runtime config is unsafe: %v", err)
 		}
 	})
 

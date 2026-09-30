@@ -2,6 +2,10 @@
 
 All notable changes are documented here. Terran follows semantic versioning.
 
+## Unreleased
+
+- Sync the global Claude and OpenCode instructions from cc1, and drop the obsolete `naru-runtime` config from the default catalog (Naru 0.11 no longer uses it).
+
 ## 0.4.0 - 2026-09-29
 
 Breaking:
