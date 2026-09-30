@@ -17,6 +17,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=5 <alias> .local/bin/terran <args>
 
 `BatchMode` means no password or passphrase prompt: if it fails to authenticate, report it and stop; the user fixes SSH access. Never run `ssh` interactively.
 
+Installed skill copies lag the catalog: a machine that has not applied the new catalog still carries the old text of this skill. After fetching a catalog, read the skill from the fetched checkout (`<catalog>/skills/<name>/SKILL.md`) and follow that copy when it differs from the installed one.
+
 ## Rules
 
 - Never push to git, on this machine or the target, with one exception: fleet-membership changes to the private overlay (`command-centers.json`, `fleet/keys/`, `ssh/`, and the overlay `terran.json` entries that declare them) may be committed and pushed without asking, as long as they only add or update machines: `ssh/authorized_keys` may gain only keys that exist under `fleet/keys/`, and no key or host may be removed. Everything else, and every push to the public catalog, is the user's.
@@ -37,7 +39,8 @@ ssh -o BatchMode=yes -o ConnectTimeout=5 <alias> .local/bin/terran <args>
 2. `reachable` false (`offline`, `terran not found`, or a `<code>: <message>` error): tell the user the reason and stop. Do not retry in a loop and do not try other transports. `incompatible terran` is different: the target most likely runs an older Terran (0.3 has no `status --summary`), so go to step 3 instead of stopping.
 3. Target `terran_version` older than this machine's, or the row shows `incompatible terran`: offer `terran-update` on the target first (binary before catalog; schema 2 catalogs need Terran 0.4 or newer). Do not continue with the catalog until the binary is current.
 4. Compare `catalog_commit` and `overlay_commit` with this machine's row. Matching commits with `clean` true means nothing to do; say so and stop.
-5. Summarize for the user: version, commits behind or ahead, held, drift, blocked, tools missing. Then ask what they want (update, diagnose, fix).
+5. Compare harness versions when the user asks about parity or before a fleet-wide update: on each machine, `opencode --version`, `naru --version`, `herdr --version`, `claude --version`, `codex --version`, `mise --version` (over SSH use an interactive login shell only for this read-only check: `ssh -o BatchMode=yes <alias> bash -lic "<tool> --version"`, or the tool's full path). Report a table; differences are for the user to decide, not drift.
+6. Summarize for the user: version, commits behind or ahead (the `catalog_*` and `overlay_*` fields show uncommitted and unpushed work on each machine), held, drift, blocked, tools missing. Then ask what they want (update, diagnose, fix).
 
 ## 2. Update a target from this machine
 
@@ -174,11 +177,25 @@ The driver is the machine running this: an existing Command Center (preferred) o
 6. Herdr links. On every machine (A), for every other machine (B) that A reaches over SSH: `herdr machine list --json`; if no entry has `label` equal to B's name, `herdr machine add <B alias> --label <B name> --remote-session default` (it prints `Remote server is ready`). If an entry with B's label points at another target, show it and ask before `herdr machine remove <id>` and adding it again. Never add a machine to itself.
 7. Verify the whole matrix: for every pair, `ssh -o BatchMode=yes <B alias> true` from A (from a remote A: `ssh -o BatchMode=yes <A alias> ssh -o BatchMode=yes -o ConnectTimeout=5 <B alias> true`), and `herdr machine status --json` on every machine (all `reachable`). Report one table: from, to, SSH, Herdr, and every failure with its exact error.
 
+Overlay pushes from two machines at once: if `git push` of a fleet-membership commit is rejected as not a fast-forward, `git pull --rebase origin main` in the overlay. A conflict in `ssh/fleet.conf` or `ssh/authorized_keys` is resolved by regenerating both from the merged `command-centers.json` and `fleet/keys/`; a conflict anywhere else stops for the user.
+
 Reaching a machine you cannot reach yet: Linux machines are reachable from every tailnet member; a Mac only from machines whose fleet key it has applied. If this machine cannot reach one, run that step from a machine that can (dispatch it there with `terran-dispatch`, or the user runs it from there). Non-interactive SSH may not have `herdr` or `terran` on `PATH`: use `~/.local/bin/terran`, and `command -v herdr` from an interactive shell there (for example `/usr/bin/herdr` on Arch, `~/.local/bin/herdr` on macOS).
 
 Local edits: Terran owns `~/.ssh/authorized_keys` on Macs as a whole file, so a key added by hand or by `ssh-copy-id` is `blocked_drift` and blocks every apply on that machine. Ask the user whether that key should reach every Mac (add it to `ssh/authorized_keys` in the overlay with a `from=` limit, then re-plan) or be dropped (they remove it by hand). Until they decide, `terran hold config/ssh-authorized-keys` on that machine keeps the rest of the fleet updates moving.
 
 Errors: `tailnet policy does not permit you to SSH as user "<x>"` means the wrong or missing `user` in the inventory. `Server accepts key` followed by `Permission denied` means the key has a passphrase or no agent: use the fleet key. `Connection timed out` or `offline`: the machine is off or off the tailnet; report it and continue with the others.
+
+## 6. Remove a machine from the fleet
+
+"I lost cc3", "retire cc2", "remove cc3 from the fleet". Its fleet key can log in to every Mac, so a lost or retired machine is removed promptly. This is a removal: confirm the machine name with the user before starting, even in an unattended run.
+
+1. In the overlay on this machine: delete `fleet/keys/<name>.pub`, remove the entry from `command-centers.json`, and regenerate `ssh/fleet.conf` and `ssh/authorized_keys` without it. Commit (`feat(fleet): remove <name>`) and push; this push is covered by the fleet-membership exception once the user confirmed the removal.
+2. Update every remaining Command Center (procedure 4). On each Mac the plan updates `config/ssh-authorized-keys`; after the apply the removed key no longer logs in there.
+3. On every remaining machine: `herdr machine list --json`, then `herdr machine remove <id>` for the entry labeled `<name>`.
+4. Tell the user to remove the device from the Tailscale admin console (a lost machine keeps its tailnet access until then), and, if it still exists and they want it cleaned, to delete `~/.ssh/terran_fleet_ed25519*` on it.
+5. Verify: `terran status` no longer lists it, and from each Mac `grep -c "terran-fleet <name>" ~/.ssh/authorized_keys` prints 0.
+
+A retired machine that is still reachable can be decommissioned first (on it: hold nothing, and leave its files; Terran does not uninstall), but removal from the fleet never depends on reaching it.
 
 ## Should trigger
 
@@ -188,6 +205,8 @@ Errors: `tailnet policy does not permit you to SSH as user "<x>"` means the wron
 - "Sync all my other machines."
 - "Why does cc2 show drift and how do I clear it?"
 - "Connect all my machines in Herdr." / "cc3 can't reach cc1."
+- "I lost my laptop, remove cc3 from the fleet."
+- "Are all my machines on the same OpenCode version?"
 
 ## Should not trigger
 
