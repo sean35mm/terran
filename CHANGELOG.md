@@ -2,6 +2,10 @@
 
 All notable changes are documented here. Terran follows semantic versioning.
 
+## 0.4.5 - 2026-09-30
+
+- `terran doctor` (and the fleet `tools_missing` count) also finds catalog tools in `~/.local/bin` and mise's shims directory when `PATH` lacks them. Tailscale SSH runs remote commands with a bare `PATH` and no shell startup files, so fleet rows no longer report installed tools as missing.
+
 ## 0.4.4 - 2026-09-30
 
 - Add `terran forget ITEM_ID [--json]`: drops the receipt entry and hold for one item without touching its destination or backups; use it to clear stale holds, or `forget` then `apply --decide ID=replace` to take the catalog version over drift.

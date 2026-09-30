@@ -114,10 +114,12 @@ func Doctor(buildVersion string) DoctorResult {
 				if !platformIncluded(tool.Platforms) {
 					continue
 				}
-				if _, err := exec.LookPath(tool.Name); err != nil {
-					add("tool:"+tool.Name, "fail", tool.Name+" not found on PATH; follow terran-provision tools step")
-				} else {
+				if _, err := exec.LookPath(tool.Name); err == nil {
 					add("tool:"+tool.Name, "ok", tool.Name+" found on PATH")
+				} else if found := userToolPath(paths, tool.Name); found != "" {
+					add("tool:"+tool.Name, "ok", tool.Name+" found at "+found+" (outside this shell's PATH, as in non-interactive SSH)")
+				} else {
+					add("tool:"+tool.Name, "fail", tool.Name+" not found on PATH; follow terran-provision tools step")
 				}
 			}
 		}
@@ -277,4 +279,25 @@ func validateTrustedStateFile(path, description string) error {
 		return err
 	}
 	return validateTrustedFileInfo(info, path, description, 0o600)
+}
+
+// userToolPath finds a tool in the per-user directories that interactive
+// shells add to PATH but non-interactive SSH sessions often lack: ~/.local/bin
+// and mise's shims.
+func userToolPath(paths Paths, name string) string {
+	shims := os.Getenv("MISE_DATA_DIR")
+	if !filepath.IsAbs(shims) {
+		data := os.Getenv("XDG_DATA_HOME")
+		if !filepath.IsAbs(data) {
+			data = filepath.Join(paths.Home, ".local", "share")
+		}
+		shims = filepath.Join(data, "mise")
+	}
+	for _, dir := range []string{filepath.Join(paths.Home, ".local", "bin"), filepath.Join(shims, "shims")} {
+		candidate := filepath.Join(dir, name)
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return candidate
+		}
+	}
+	return ""
 }

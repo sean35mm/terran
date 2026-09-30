@@ -145,6 +145,16 @@ func TestDoctorChecksRequiredTools(t *testing.T) {
 	if check := checks[len(checks)-1]; check.Name != "binary_path" || check.Status != "warn" || !strings.Contains(check.Message, "installed at "+filepath.Join(home, ".local", "bin", "terran")+"; only this shell's PATH lacks it") {
 		t.Fatalf("binary_path = %#v", check)
 	}
+
+	// Tools in ~/.local/bin or mise's shims count even when PATH lacks them.
+	mustWrite(t, filepath.Join(home, ".local", "bin", "missing-tool"), "#!/bin/sh\n", 0o755)
+	t.Setenv("MISE_DATA_DIR", "")
+	t.Setenv("XDG_DATA_HOME", "")
+	mustWrite(t, filepath.Join(home, ".local", "share", "mise", "shims", "shim-tool"), "#!/bin/sh\n", 0o755)
+	writeToolCatalog(t, repo, "test-catalog", []Tool{{Name: "present-tool"}, {Name: "missing-tool"}, {Name: "shim-tool"}})
+	if result := Doctor("test"); !doctorCheck(result, "tool:missing-tool", "ok") || !doctorCheck(result, "tool:shim-tool", "ok") {
+		t.Fatalf("user tool dirs not searched: %#v", result.Checks)
+	}
 }
 
 func TestDuplicateToolAcrossCatalogsIsInvalid(t *testing.T) {
