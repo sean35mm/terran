@@ -2,6 +2,16 @@
 
 All notable changes are documented here. Terran follows semantic versioning.
 
+## 0.4.4 - 2026-09-30
+
+- Add `terran forget ITEM_ID [--json]`: drops the receipt entry and hold for one item without touching its destination or backups; use it to clear stale holds, or `forget` then `apply --decide ID=replace` to take the catalog version over drift.
+- The plan digest now covers file contents inside a colliding skill directory, so editing one after review fails `apply --expect` with `plan_changed`.
+- `terran status` and `status --summary --json` report uncommitted, ahead, and behind counts for the catalog and overlay checkouts (`catalog_dirty`, `catalog_ahead`, `catalog_behind`, `overlay_*`; no fetch; omitted when unknown). A 0.4.3 machine shows a 0.4.4 machine as `incompatible terran` until its own binary is updated; update binaries first.
+- `terran doctor` `binary_path` says when terran is installed at `~/.local/bin/terran` and only the shell's PATH lacks it.
+- A test checks that every `terran` command and flag named in the skills and README exists.
+- Skills: `terran-fleet` gains "Remove a machine from the fleet", harness version comparison, and overlay push-conflict handling; `terran-curate-skills` gains "Sync this machine into the catalog"; `terran-diagnose` documents `forget`; every Terran skill tells agents to follow the freshly fetched catalog copy of a skill when the installed one lags.
+- Default catalog: manage the global Codex instructions (`codex-global`).
+
 ## 0.4.3 - 2026-09-30
 
 - New `ssh-config` (`~/.ssh/terran-fleet.conf`) and `ssh-authorized-keys` (`~/.ssh/authorized_keys`) config targets, mode 0600, accepted only from a private overlay catalog. `ssh-config` sources may hold only literal `Host` blocks with `HostName`, `User`, `Port`, `IdentityFile ~/.ssh/<name>`, and `IdentitiesOnly`; `ssh-authorized-keys` sources only public key lines that each carry a literal `from="..."` limit and at most `restrict` or `no-*` flags. Private keys, commands, wildcards, and absolute machine paths are rejected.
