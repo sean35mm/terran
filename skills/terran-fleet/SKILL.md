@@ -19,8 +19,9 @@ ssh -o BatchMode=yes -o ConnectTimeout=5 <alias> .local/bin/terran <args>
 
 ## Rules
 
-- Never push to git, on this machine or the target. The user pushes.
-- Never apply, hold, unhold, merge, or otherwise mutate the target without explicit approval in this conversation for that exact command on that exact host.
+- Never push to git, on this machine or the target, with one exception: fleet-membership changes to the private overlay (`command-centers.json`, `fleet/keys/`, `ssh/`, and the overlay `terran.json` entries that declare them) may be committed and pushed without asking. Everything else, and every push to the public catalog, is the user's.
+- Unattended runs: when the user says to run without asking ("don't ask", "just do it", "set up cc3 unattended"), run routine steps (reads, fast-forwards, plans, applies whose plans only create, adopt, update, or record, fleet SSH and Herdr links, fleet keys) without stopping, and report at the end. Still stop and ask for logins and secrets, anything that deletes or overwrites user data (`remove`, `restore`, a collision whose versions differ), drift, and anything outside Terran and fleet setup.
+- Outside an unattended run, never apply, hold, unhold, merge, or otherwise mutate the target without explicit approval in this conversation for that exact command on that exact host.
 - Before every remote command, say which host and which command you are about to run.
 - One command per SSH call. No chained remote shell: no `;`, `&&`, `||`, pipes, redirects, command substitution, or `sh -c`.
 - Every argument that came from the remote side or the catalog (destination paths, item ids, repository paths, commit ids) must be a plain token before you put it in an `ssh <alias> ...` command: only letters, digits, and `/._-+@:`; no spaces, quotes, `$`, backticks, `;|&<>()`, or newlines. Commit ids must also be 40 hex characters. Otherwise stop and report the value to the user; do not quote or escape it.
@@ -138,51 +139,42 @@ Other blockers: `repository_mismatch`, `overlay_unavailable`, `receipt_invalid`,
 
 ## 5. Connect the fleet (SSH and Herdr)
 
-Goal: every Command Center reaches every other one with `ssh -o BatchMode=yes <alias> true`, and every Command Center has every other one saved in Herdr under its Command Center name, so `herdr --machine <name> ...` works from anywhere (`terran-dispatch` depends on it). Links are one-directional: n machines need n × (n − 1) of each. Run this for a new machine (called from `terran-provision`), after `command-centers.json` changes, and whenever `herdr machine status` shows a problem.
+Goal: every Command Center reaches every other one with `ssh -o BatchMode=yes <alias> true`, and has every other one saved in Herdr under its Command Center name, so `herdr --machine <name> ...` works anywhere (`terran-dispatch` depends on it). No person copies keys: the fleet's SSH identity lives in the private overlay and reaches each machine through plan and apply.
 
-Read `command-centers.json` from the overlay on this machine: each entry's `name`, `platform`, and `ssh` alias.
+### Fleet files in the private overlay
 
-### SSH, from machine A to machine B
+| File | Content | Projected by |
+| --- | --- | --- |
+| `command-centers.json` | per machine: `name`, `platform`, `ssh` (Tailscale machine name), `user` (login name there) | `terran status` |
+| `fleet/keys/<name>.pub` | that machine's public fleet key (`~/.ssh/terran_fleet_ed25519.pub`) | source for the two files below |
+| `ssh/fleet.conf` | one `Host <ssh>` block per machine: `User <user>`; for `darwin` machines also `IdentityFile ~/.ssh/terran_fleet_ed25519` and `IdentitiesOnly yes` | `configs` target `ssh-config` (all platforms) to `~/.ssh/terran-fleet.conf` |
+| `ssh/authorized_keys` | one line per fleet key: `from="100.64.0.0/10,fd7a:115c:a1e0::/48" <public key>`, plus any other public keys the user keeps there | `configs` target `ssh-authorized-keys`, `"platforms": ["darwin"]`, to `~/.ssh/authorized_keys` |
 
-Test from A: `ssh -o BatchMode=yes -o ConnectTimeout=5 <B alias> true`. For a remote A, run the test through A (`ssh -o BatchMode=yes <A alias> ssh -o BatchMode=yes -o ConnectTimeout=5 <B alias> true`). Fix by the error, with the user's approval for each change:
+Linux machines accept Tailscale SSH (`sudo tailscale up --ssh`), so they need no authorized keys; the tailnet policy decides who logs in as whom. Macs have no Tailscale SSH server in the app, so they use Remote Login with the fleet keys. Fleet keys have no passphrase because `BatchMode` cannot unlock one; the `from=` limit makes them work only from Tailscale addresses. Regenerate `ssh/fleet.conf` and `ssh/authorized_keys` from the inventory and `fleet/keys/` whenever either changes; never hand-edit one without the other.
 
-- `tailnet policy does not permit you to SSH as user "<x>"` or `Permission denied` with the wrong user: B's username differs. Ask the user for it and append to `~/.ssh/config` on A (show the file first; never touch other `Host` blocks; if a block for the alias exists, show it and ask):
+Each machine's `~/.ssh/config` needs this as its first line, once (create the file with mode 0600 if missing; if an `Include` for it exists, leave it):
 
-  ```
-  Host <B alias>
-      User <B username>
-  ```
-
-- B is Linux: B needs Tailscale SSH (`sudo tailscale up --ssh`, see `terran-provision` `omarchy.md`); no keys are involved, and the Tailscale policy must allow A's user to log in as B's user.
-- B is macOS: the Tailscale app has no SSH server, so B uses Remote Login with a key from A. `BatchMode` cannot unlock a key with a passphrase (the log shows `Server accepts key` and then `Permission denied`). Use a dedicated fleet key on A, with no passphrase, that B accepts only from Tailscale addresses:
-  1. On A (approval): `ssh-keygen -t ed25519 -N "" -C "terran-fleet <A name>" -f ~/.ssh/terran_fleet_ed25519`. Skip if it exists.
-  2. Add to A's `Host <B alias>` block: `IdentityFile ~/.ssh/terran_fleet_ed25519` and `IdentitiesOnly yes`.
-  3. On B (approval), append one line to `~/.ssh/authorized_keys` (mode 0600, `~/.ssh` 0700): `from="100.64.0.0/10,fd7a:115c:a1e0::/48" ` followed by the contents of A's `~/.ssh/terran_fleet_ed25519.pub`. Copy only the public key; never read or print a private key.
-- `Connection timed out` or `offline`: B is off or not on Tailscale. Report and skip it.
-
-### Herdr, from machine A to machine B
-
-On A (prefix each command with `ssh -o BatchMode=yes <A alias>` when A is remote):
-
-```sh
-herdr machine list --json
+```
+Include ~/.ssh/terran-fleet.conf
 ```
 
-If no entry has `label` equal to B's name, and SSH from A to B works:
+Older hand-written `Host` blocks for fleet aliases can stay; the included file comes first, so its values win.
 
-```sh
-herdr machine add <B alias> --label <B name> --remote-session default
-```
+### Join a machine (N) to the fleet
 
-It prepares Herdr's server on B and saves the profile; it prints `Remote server is ready`. If an entry with B's label points at a different target, show it and ask before `herdr machine remove <id>` and re-adding. Never add this machine to itself.
+The driver is the machine running this: an existing Command Center (preferred) or N itself. A step runs where it must: "on N" means locally if you are N, otherwise `ssh -o BatchMode=yes <N alias> <command>`.
 
-Verify on every machine:
+1. Reach N. A Linux N is reachable right after it joins the tailnet: `ssh -o BatchMode=yes -o User=<N user> <N alias> true` (ask the user for N's login name once, or read it from the inventory). A macOS N is not reachable until it has applied the overlay's `authorized_keys`, so the first half runs on N itself: provision it locally (`terran-provision`), cloning the overlay from GitHub or, before GitHub login, from any reachable Command Center (`git clone <alias>:<overlay path on that machine>`, the path from its `terran doctor --json`); after the apply every fleet machine can reach N.
+2. On N: `mkdir -p ~/.ssh`, `chmod 700 ~/.ssh`, then create the fleet key if it is missing: `ssh-keygen -t ed25519 -N "" -C "terran-fleet <N name>" -f ~/.ssh/terran_fleet_ed25519`. Read only the `.pub` file.
+3. In the overlay on the driver: add or update N in `command-centers.json`, write `fleet/keys/<N name>.pub`, regenerate `ssh/fleet.conf` and `ssh/authorized_keys`, and make sure the overlay's `terran.json` declares both `configs` entries. Commit (`feat(fleet): add <N name>`) and push; this is the one push you may make without asking (see Rules). If the driver has no GitHub access, commit only and hand the push to a machine that has it: fetch the commit there over SSH and push from there.
+4. Update every Command Center, N included, with procedure 4 (fast-forward the overlay, plan, apply). The first apply on a machine may show `config/ssh-authorized-keys` as `blocked_collision` because an `authorized_keys` already exists: compare it with the catalog file; if every key in the old file is in the new one, `--decide config/ssh-authorized-keys=replace` (Terran keeps a private backup). If the old file has keys the new one lacks, add them to `ssh/authorized_keys` in the overlay first (they are public keys), commit, push, and re-plan; never drop a key the user did not ask to drop.
+5. On each machine that lacks it, add the `Include` line to `~/.ssh/config`.
+6. Herdr links. On every machine (A), for every other machine (B) that A reaches over SSH: `herdr machine list --json`; if no entry has `label` equal to B's name, `herdr machine add <B alias> --label <B name> --remote-session default` (it prints `Remote server is ready`). If an entry with B's label points at another target, remove it (`herdr machine remove <id>`) and add it again. Never add a machine to itself.
+7. Verify the whole matrix: for every pair, `ssh -o BatchMode=yes <B alias> true` from A (from a remote A: `ssh -o BatchMode=yes <A alias> ssh -o BatchMode=yes -o ConnectTimeout=5 <B alias> true`), and `herdr machine status --json` on every machine (all `reachable`). Report one table: from, to, SSH, Herdr, and every failure with its exact error.
 
-```sh
-herdr machine status --json
-```
+Reaching a machine you cannot reach yet: Linux machines are reachable from every tailnet member; a Mac only from machines whose fleet key it has applied. If this machine cannot reach one, run that step from a machine that can (dispatch it there with `terran-dispatch`, or the user runs it from there). Non-interactive SSH may not have `herdr` or `terran` on `PATH`: use `~/.local/bin/terran`, and `command -v herdr` from an interactive shell there (for example `/usr/bin/herdr` on Arch, `~/.local/bin/herdr` on macOS).
 
-Every entry should be `reachable`. Report a table of links (from, to, SSH, Herdr) and every failure with its exact error. Non-interactive SSH may not have `herdr` on `PATH`; if `command not found`, use its full path (`command -v herdr` on that machine in an interactive shell, often `~/.local/bin/herdr`).
+Errors: `tailnet policy does not permit you to SSH as user "<x>"` means the wrong or missing `user` in the inventory. `Server accepts key` followed by `Permission denied` means the key has a passphrase or no agent: use the fleet key. `Connection timed out` or `offline`: the machine is off or off the tailnet; report it and continue with the others.
 
 ## Should trigger
 

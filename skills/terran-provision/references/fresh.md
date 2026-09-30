@@ -73,20 +73,11 @@ Exit 3 means blocked; nothing was applied. `plan_changed` means the plan moved: 
 
 The user performs each login (Tailscale, GitHub, Claude, Codex, and others the checklist names). Tell them what to run and wait. Do not read credential files.
 
-## 9. Fleet access
+## 9. Join the fleet
 
-- Tailscale machine name = Command Center name.
-- macOS: the user turns on Remote Login (see `darwin.md`).
-- Linux: `sudo tailscale up --ssh` (see `omarchy.md`).
-- Add the machine to `command-centers.json` in the overlay clone:
-
-  ```json
-  {"schema_version":1,"command_centers":[{"name":"<name>","platform":"darwin|linux","ssh":"<tailscale machine name>"}]}
-  ```
-
-  Keep the existing entries; `name` values are unique; `ssh` must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
-- Commit the overlay change if the user asks, then ask them to push. Never push yourself.
-- Then join the fleet: follow the `terran-fleet` procedure "Connect the fleet (SSH and Herdr)" with this machine as both A (it reaches every other one) and B (every other one reaches it). Macs need the dedicated fleet key described there, because `BatchMode` cannot unlock a key with a passphrase.
+- macOS: the user turns on Remote Login (see `darwin.md`). Linux: `sudo tailscale up --ssh` (see `omarchy.md`).
+- Follow the `terran-fleet` procedure "Connect the fleet (SSH and Herdr)", "Join a machine (N) to the fleet", with this machine as N. It creates `~/.ssh/terran_fleet_ed25519`, adds this machine to `command-centers.json` (`name`, `platform`, `ssh` = Tailscale machine name, `user` = this login name) and to the overlay's fleet files, pushes the overlay, updates the other Command Centers, and links Herdr both ways.
+- If this machine cannot reach a Mac in the fleet yet, that Mac's update runs from a machine that can (see the procedure).
 
 ## 10. Verify
 

@@ -550,3 +550,36 @@ func TestValidateTextConfig(t *testing.T) {
 		t.Fatal("credential-bearing mise config accepted at load")
 	}
 }
+
+func TestSSHTargetsValidateContent(t *testing.T) {
+	key := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN/5oxSH40N+n5n0Jzv2TR4ma9HQS/jrsvf5j12Rst6G terran-fleet cc2"
+	if err := validateAuthorizedKeys([]byte("# fleet\n" + `from="100.64.0.0/10,fd7a:115c:a1e0::/48" ` + key + "\n" + key + "\n")); err != nil {
+		t.Fatalf("valid authorized keys rejected: %v", err)
+	}
+	for name, body := range map[string]string{
+		"private key": "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n",
+		"command":     "curl example | sh\n",
+		"bare option": `from="100.64.0.0/10"` + "\n",
+	} {
+		if validateAuthorizedKeys([]byte(body)) == nil {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+	if err := validateSSHConfig([]byte("Host omarchy\n    User sgil\n    IdentityFile ~/.ssh/terran_fleet_ed25519\n    IdentitiesOnly yes\n")); err != nil {
+		t.Fatalf("valid ssh config rejected: %v", err)
+	}
+	if validateSSHConfig([]byte("Host a\n    IdentityFile /Users/someone/.ssh/id\n")) == nil {
+		t.Fatal("absolute machine path accepted")
+	}
+	home := t.TempDir()
+	paths := Paths{Home: home, ConfigBase: filepath.Join(home, ".config")}
+	for target, want := range map[string]string{"ssh-config": filepath.Join(home, ".ssh", "terran-fleet.conf"), "ssh-authorized-keys": filepath.Join(home, ".ssh", "authorized_keys")} {
+		spec, ok := lookupTarget("config", target)
+		if !ok || spec.Mode != 0o600 {
+			t.Fatalf("%s target: %#v", target, spec)
+		}
+		if got, _ := spec.Dest(paths, ""); got != want {
+			t.Fatalf("%s destination %q", target, got)
+		}
+	}
+}

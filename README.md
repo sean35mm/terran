@@ -131,7 +131,7 @@ terran                                  fleet table (help when not enrolled)
 terran help [command]
 terran version [--json]
 terran enroll --repo PATH [--name NAME] [--overlay PATH] [--replace] [--json]
-terran plan   [--target all|agents|claude|opencode|codex|mise|t3] [--json]
+terran plan   [--target all|agents|claude|opencode|codex|mise|ssh|t3] [--json]
 terran apply  [--target ...] [--decide ITEM_ID=replace|keep]... [--expect DIGEST] [--json]
 terran status [--json]
 terran status NAME [--json]
@@ -414,7 +414,7 @@ owns.
 | --- | --- | --- | --- |
 | Skill | `skills/<name>` | `~/.agents/skills/<name>`, `~/.claude/skills/<name>` | managed directory copy |
 | Instruction | any file | `claude-global`: `~/.claude/CLAUDE.md`; `opencode-global`: `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/AGENTS.md`; `codex-global`: `${CODEX_HOME:-$HOME/.codex}/AGENTS.md` | whole-file copy |
-| Config | any file | `opencode-config`, `naru-runtime`: `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/{opencode,naru-runtime}.json`; `mise-config`, `mise-lock`: `${XDG_CONFIG_HOME:-$HOME/.config}/mise/{config.toml,mise.lock}` | whole-file copy |
+| Config | any file | `opencode-config`, `naru-runtime`: `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/{opencode,naru-runtime}.json`; `mise-config`, `mise-lock`: `${XDG_CONFIG_HOME:-$HOME/.config}/mise/{config.toml,mise.lock}`; `ssh-config`: `~/.ssh/terran-fleet.conf`; `ssh-authorized-keys`: `~/.ssh/authorized_keys` (both mode 0600, public keys only) | whole-file copy |
 | File | any file | `claude-agent`: `~/.claude/agents/<name>.md`; `claude-command`: `~/.claude/commands/<name>.md`; `claude-hook`: `~/.claude/hooks/<name>` (mode 0755); `opencode-plugin`: `.../opencode/plugins/<name>.js\|.ts`; `opencode-tool`: `.../opencode/tool/<name>.ts`; `opencode-command`: `.../opencode/command/<name>.md` | whole-file copy of one named file |
 | JSON keys | JSON object | `claude-settings`: `~/.claude/settings.json`; `t3-settings`: `~/.t3/userdata/settings.json`; `opencode-settings`: `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json` (mode 0600) | Terran owns only the listed top-level keys; every other key is preserved |
 | Tool | name | none | `terran doctor` requires it on `PATH`; mise installs it |
@@ -491,7 +491,11 @@ manifests are still read and upgraded in memory):
   `SKILL.md` frontmatter; `targets` are `agents` and/or `claude`.
 - `instructions`: `claude-global`, `opencode-global`, `codex-global`.
 - `configs`: `opencode-config`, `naru-runtime` (strict sanitized JSON),
-  `mise-config`, `mise-lock` (text).
+  `mise-config`, `mise-lock` (text), `ssh-config` (an ssh_config fragment that
+  `~/.ssh/config` includes), and `ssh-authorized-keys` (comments and public key
+  lines only, each optionally prefixed with sshd options such as `from=`). The
+  SSH targets reject private key material and absolute machine paths; they
+  belong in the private overlay.
 - `files`: `target` is `claude-agent`, `claude-command`, `claude-hook`,
   `opencode-plugin`, `opencode-tool`, or `opencode-command`; `name` matches
   `^[a-z0-9][a-z0-9._-]{0,127}$` with the extension that target allows.
@@ -540,18 +544,26 @@ The overlay may also carry `command-centers.json` at its root, which powers
   "schema_version": 1,
   "command_centers": [
     {"name": "cc1", "platform": "darwin", "ssh": "cc1"},
-    {"name": "cc2", "platform": "linux", "ssh": "cc2"}
+    {"name": "cc2", "platform": "linux", "ssh": "cc2", "user": "me"}
   ]
 }
 ```
 
 `name` is the unique display name (the value passed to `terran enroll --name`).
 `platform` is `darwin` or `linux`. `ssh` is a host alias matching
-`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. Using the Tailscale machine name as both
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. `user` (optional) is the login name on that
+machine when it differs; `terran status` passes it to ssh. Using the Tailscale machine name as both
 the Command Center name and the SSH alias is the simplest arrangement. Each
 listed machine must have Terran installed at `~/.local/bin/terran` and
 key-based (non-interactive) SSH access from the machine running `terran status`.
 The `ccN` naming is a convention; choose any names.
+
+The overlay can also carry the fleet's SSH setup so machines join without
+manual key copying: `fleet/keys/<name>.pub` (each machine's fleet public key),
+`ssh/fleet.conf` (a `Host` block per machine, projected by `ssh-config`), and
+`ssh/authorized_keys` (every fleet key limited to Tailscale addresses,
+projected by `ssh-authorized-keys` on macOS). The `terran-fleet` skill keeps
+them in sync with `command-centers.json`.
 
 ## Platforms and prerequisites
 

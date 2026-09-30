@@ -31,7 +31,7 @@ func fleetEnvironment(t *testing.T, inventory string) {
 	t.Cleanup(func() { gitHead = previous })
 }
 
-func stubSSH(t *testing.T, stub func(ctx context.Context, alias string, args ...string) ([]byte, error)) {
+func stubSSH(t *testing.T, stub func(ctx context.Context, target CommandCenter, args ...string) ([]byte, error)) {
 	t.Helper()
 	previous := runSSH
 	runSSH = stub
@@ -58,7 +58,8 @@ const fleetInventory = `{"schema_version":1,"command_centers":[
 
 func TestFleetStatusMixedResults(t *testing.T) {
 	fleetEnvironment(t, fleetInventory)
-	stubSSH(t, func(ctx context.Context, alias string, args ...string) ([]byte, error) {
+	stubSSH(t, func(ctx context.Context, target CommandCenter, args ...string) ([]byte, error) {
+		alias := target.SSH
 		if strings.Join(args, " ") != "status --summary --json" {
 			t.Errorf("unexpected ssh args %v", args)
 		}
@@ -101,7 +102,8 @@ func TestFleetStatusMixedResults(t *testing.T) {
 
 func TestFleetStatusRemoteErrorEnvelopeAndMissingTools(t *testing.T) {
 	fleetEnvironment(t, `{"schema_version":1,"command_centers":[{"name":"cc2","platform":"linux","ssh":"cc2"},{"name":"cc3","platform":"linux","ssh":"cc3"}]}`)
-	stubSSH(t, func(ctx context.Context, alias string, args ...string) ([]byte, error) {
+	stubSSH(t, func(ctx context.Context, target CommandCenter, args ...string) ([]byte, error) {
+		alias := target.SSH
 		if alias == "cc2" {
 			return []byte(`{"schema_version":2,"error":{"code":"not_enrolled","message":"status failed: lstat x:\nno such file","next":"enroll"}}`), exitError(t, "1")
 		}
@@ -141,7 +143,7 @@ func TestLocalSummaryCountsMissingToolsWithoutUnhealthy(t *testing.T) {
 }
 
 func TestFleetStatusWithoutInventoryOrOverlayIsLocalOnly(t *testing.T) {
-	stubSSH(t, func(context.Context, string, ...string) ([]byte, error) {
+	stubSSH(t, func(context.Context, CommandCenter, ...string) ([]byte, error) {
 		t.Error("ssh must not run")
 		return nil, errors.New("unreachable")
 	})
@@ -171,7 +173,7 @@ func TestFleetStatusUnenrolledFails(t *testing.T) {
 
 func TestLoadInventoryRejectsInvalidBeforeAnyExec(t *testing.T) {
 	called := false
-	stubSSH(t, func(context.Context, string, ...string) ([]byte, error) { called = true; return nil, nil })
+	stubSSH(t, func(context.Context, CommandCenter, ...string) ([]byte, error) { called = true; return nil, nil })
 	cc := func(name, platform, ssh string) string {
 		return `{"schema_version":1,"command_centers":[{"name":"` + name + `","platform":"` + platform + `","ssh":"` + ssh + `"}]}`
 	}
@@ -185,6 +187,8 @@ func TestLoadInventoryRejectsInvalidBeforeAnyExec(t *testing.T) {
 		"schema version 2":  `{"schema_version":2,"command_centers":[]}`,
 		"unknown field":     `{"schema_version":1,"command_centers":[],"extra":1}`,
 		"trailing document": `{"schema_version":1,"command_centers":[]} {}`,
+		"option as user":    `{"schema_version":1,"command_centers":[{"name":"cc2","platform":"linux","ssh":"cc2","user":"-oProxyCommand=x"}]}`,
+		"user with at":      `{"schema_version":1,"command_centers":[{"name":"cc2","platform":"linux","ssh":"cc2","user":"a@b"}]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -207,11 +211,18 @@ func TestLoadInventoryRejectsInvalidBeforeAnyExec(t *testing.T) {
 	if inventory, err := LoadInventory(dir); err != nil || len(inventory.CommandCenters) != 1 {
 		t.Fatalf("valid inventory: %v", err)
 	}
+	withUser := `{"schema_version":1,"command_centers":[{"name":"cc2","platform":"linux","ssh":"omarchy","user":"sgil"}]}`
+	if err := os.WriteFile(filepath.Join(dir, inventoryFile), []byte(withUser), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if inventory, err := LoadInventory(dir); err != nil || inventory.CommandCenters[0].User != "sgil" {
+		t.Fatalf("inventory with user: %#v %v", inventory, err)
+	}
 }
 
 func TestInvalidInventoryFailsFleetBeforeExec(t *testing.T) {
 	fleetEnvironment(t, `{"schema_version":1,"command_centers":[{"name":"cc2","platform":"linux","ssh":"-bad"}]}`)
-	stubSSH(t, func(context.Context, string, ...string) ([]byte, error) {
+	stubSSH(t, func(context.Context, CommandCenter, ...string) ([]byte, error) {
 		t.Error("ssh must not run")
 		return nil, nil
 	})
@@ -222,7 +233,8 @@ func TestInvalidInventoryFailsFleetBeforeExec(t *testing.T) {
 
 func TestFleetStatusTimeoutMarksHungMachineOffline(t *testing.T) {
 	fleetEnvironment(t, fleetInventory)
-	stubSSH(t, func(ctx context.Context, alias string, args ...string) ([]byte, error) {
+	stubSSH(t, func(ctx context.Context, target CommandCenter, args ...string) ([]byte, error) {
+		alias := target.SSH
 		if alias == "cc3" {
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -254,7 +266,8 @@ func TestFleetStatusTimeoutMarksHungMachineOffline(t *testing.T) {
 
 func TestRemoteStatus(t *testing.T) {
 	fleetEnvironment(t, fleetInventory)
-	stubSSH(t, func(ctx context.Context, alias string, args ...string) ([]byte, error) {
+	stubSSH(t, func(ctx context.Context, target CommandCenter, args ...string) ([]byte, error) {
+		alias := target.SSH
 		if strings.Join(args, " ") != "status --local --json" {
 			t.Errorf("unexpected ssh args %v", args)
 		}
@@ -311,7 +324,7 @@ func TestFleetStatusOverFakeSSH(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fleetEnvironment(t, `{"schema_version":1,"command_centers":[{"name":"cc1","platform":"`+runtime.GOOS+`","ssh":"cc1"},{"name":"cc2","platform":"`+runtime.GOOS+`","ssh":"cc2"},{"name":"cc3","platform":"linux","ssh":"cc3"}]}`)
+	fleetEnvironment(t, `{"schema_version":1,"command_centers":[{"name":"cc1","platform":"`+runtime.GOOS+`","ssh":"cc1"},{"name":"cc2","platform":"`+runtime.GOOS+`","ssh":"cc2","user":"remote-user"},{"name":"cc3","platform":"linux","ssh":"cc3"}]}`)
 	binary := filepath.Join(t.TempDir(), "terran")
 	build := exec.Command(goBin, "build", "-o", binary, "github.com/sean35mm/terran/cmd/terran")
 	build.Env = append(os.Environ(), "GOCACHE="+strings.TrimSpace(string(cache)))
@@ -351,10 +364,12 @@ func TestFleetStatusOverFakeSSH(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", localState)
 
 	// The fake ssh drops the -o options and the alias, then runs the built binary as the remote user.
-	// cc3 simulates an unreachable host with ssh's connection-failure exit code.
+	// cc3 simulates an unreachable host with ssh's connection-failure exit code; cc2 is only
+	// reachable with the inventory's user.
 	fakeDir := t.TempDir()
-	script := "#!/bin/sh\nwhile [ \"$1\" = -o ]; do shift 2; done\nalias=$1\nshift 2\n" +
+	script := "#!/bin/sh\nuser=\nwhile [ \"$1\" = -o ]; do case \"$2\" in User=*) user=${2#User=};; esac; shift 2; done\nalias=$1\nshift 2\n" +
 		"[ \"$alias\" = cc3 ] && exit 255\n" +
+		"[ \"$alias\" = cc2 ] && [ \"$user\" != remote-user ] && exit 255\n" +
 		"HOME='" + remoteHome + "' XDG_CONFIG_HOME='" + filepath.Join(remoteHome, "config") + "' XDG_STATE_HOME='" + filepath.Join(remoteHome, "state") + "' exec '" + filepath.Join(remoteHome, ".local", "bin", "terran") + "' \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(fakeDir, "ssh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)

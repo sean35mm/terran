@@ -103,6 +103,26 @@ var targetSpecs = []TargetSpec{
 		Validate: validateTextConfig,
 	},
 	{
+		ID:    "ssh-config",
+		Kind:  "config",
+		Group: "ssh",
+		Dest: func(p Paths, name string) (string, error) {
+			return filepath.Join(p.Home, ".ssh", "terran-fleet.conf"), nil
+		},
+		Mode:     0o600,
+		Validate: validateSSHConfig,
+	},
+	{
+		ID:    "ssh-authorized-keys",
+		Kind:  "config",
+		Group: "ssh",
+		Dest: func(p Paths, name string) (string, error) {
+			return filepath.Join(p.Home, ".ssh", "authorized_keys"), nil
+		},
+		Mode:     0o600,
+		Validate: validateAuthorizedKeys,
+	},
+	{
 		ID:    "claude-settings",
 		Kind:  "json-keys",
 		Group: "claude",

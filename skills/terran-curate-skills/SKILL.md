@@ -33,7 +33,7 @@ Edit `terran.json` in the chosen catalog. Sources are clean relative paths insid
 | --- | --- | --- |
 | `projections` | skill in `skills/<name>/SKILL.md` (frontmatter `name` must match) | `agents`, `claude` |
 | `instructions` | complete global instruction file | `claude-global`, `opencode-global`, `codex-global` |
-| `configs` | whole config file (strict, sanitized) | `opencode-config`, `naru-runtime`, `mise-config`, `mise-lock` |
+| `configs` | whole config file (strict, sanitized) | `opencode-config`, `naru-runtime`, `mise-config`, `mise-lock`, `ssh-config`, `ssh-authorized-keys` (private overlay only) |
 | `files` (`target`, `name`, `source`) | one named file in a fixed directory | `claude-agent`, `claude-command`, `claude-hook`, `opencode-plugin`, `opencode-tool`, `opencode-command` |
 | `json_keys` | owned top-level keys of a shared settings file | `claude-settings`, `t3-settings`, `opencode-settings` (not together with `opencode-config`) |
 | `tools` (`name`) | CLI that `terran doctor` requires on `PATH` | none |

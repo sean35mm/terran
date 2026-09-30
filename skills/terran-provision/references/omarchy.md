@@ -27,11 +27,12 @@ sudo tailscale up --ssh
 
 `install.sh` puts the binary at `$HOME/.local/bin/terran`. Fleet status runs `~/.local/bin/terran` over SSH, so keep it there. Non-interactive SSH sessions must find it by that path; Terran calls it by the relative path `.local/bin/terran`.
 
-## Fleet access (stage 9)
+## Fleet access (join the fleet)
 
 - `sudo tailscale up --ssh` (above). Restrict Tailscale ACLs to the user's own devices.
-- Test from the controlling machine: `ssh <name> .local/bin/terran version --json`.
-- Add the machine to `command-centers.json` in the overlay with `"platform": "linux"`.
+- The tailnet policy must let fleet machines log in as this machine's user; that user goes in `command-centers.json` as `user`, with `"platform": "linux"`.
+- Test from another Command Center: `ssh -o BatchMode=yes -o User=<user> <alias> .local/bin/terran version --json`.
+- Then the `terran-fleet` procedure "Connect the fleet (SSH and Herdr)". This machine needs no `authorized_keys`; it still gets a fleet key so it can reach the Macs.
 
 ## Platform notes
 

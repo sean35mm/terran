@@ -26,12 +26,12 @@ Every command below needs the user's approval before you run it.
 
 `install.sh` puts the binary at `$HOME/.local/bin/terran`. Fleet status runs `~/.local/bin/terran` over SSH, so keep it there. Add `$HOME/.local/bin` to `PATH` only with the user's approval.
 
-## Fleet access (stage 9)
+## Fleet access (join the fleet)
 
 macOS has no Tailscale SSH server for the app builds, so use Remote Login:
 
 - The user enables System Settings > General > Sharing > Remote Login (scoped to their own account).
-- Each other Command Center's dedicated fleet key goes in `~/.ssh/authorized_keys` on this machine, limited to Tailscale addresses; see the `terran-fleet` procedure "Connect the fleet". You copy only public keys; never read or print private keys.
+- `~/.ssh/authorized_keys` comes from the private overlay (`ssh-authorized-keys` target): every fleet key, limited to Tailscale addresses. Apply it before expecting other machines to reach this Mac; see the `terran-fleet` procedure "Connect the fleet". You handle only public keys; never read or print private keys.
 - `ssh` uses `BatchMode`, so key authentication must work non-interactively: a key with a passphrase fails. Test with `ssh -o BatchMode=yes <alias> true` from each other machine.
 - Restrict Tailscale ACLs to the user's own devices where possible.
 

@@ -24,6 +24,9 @@ const (
 )
 
 var sshAliasPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// sshUserPattern matches login names on macOS and Linux.
+var sshUserPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 var summaryVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
 var summaryCommitPattern = regexp.MustCompile(`^[0-9a-f]{7}$`)
 
@@ -36,6 +39,9 @@ type CommandCenter struct {
 	Name     string `json:"name"`
 	Platform string `json:"platform"`
 	SSH      string `json:"ssh"`
+	// User is the login name on that machine when it differs from the
+	// connecting user's; empty uses ssh's own default or ssh config.
+	User string `json:"user,omitempty"`
 }
 
 type MachineSummary struct {
@@ -59,11 +65,15 @@ type MachineSummary struct {
 
 // runSSH runs the remote terran with a fixed argument vector; nothing goes through a shell.
 // It is a variable so tests can stub it.
-var runSSH = func(ctx context.Context, alias string, args ...string) ([]byte, error) {
-	if !sshAliasPattern.MatchString(alias) {
-		return nil, fmt.Errorf("invalid ssh alias")
+var runSSH = func(ctx context.Context, target CommandCenter, args ...string) ([]byte, error) {
+	if !sshAliasPattern.MatchString(target.SSH) || (target.User != "" && !sshUserPattern.MatchString(target.User)) {
+		return nil, fmt.Errorf("invalid ssh alias or user")
 	}
-	cmd := exec.CommandContext(ctx, "ssh", append([]string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", alias, ".local/bin/terran"}, args...)...)
+	options := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5"}
+	if target.User != "" {
+		options = append(options, "-o", "User="+target.User)
+	}
+	cmd := exec.CommandContext(ctx, "ssh", append(append(options, target.SSH, ".local/bin/terran"), args...)...)
 	out := &cappedBuffer{limit: sshOutputLimit}
 	cmd.Stdout = out
 	cmd.WaitDelay = time.Second
@@ -144,6 +154,9 @@ func LoadInventory(overlayPath string) (Inventory, error) {
 		}
 		if !sshAliasPattern.MatchString(cc.SSH) {
 			return Inventory{}, fmt.Errorf("%s: command center %q has an invalid ssh alias", inventoryFile, cc.Name)
+		}
+		if cc.User != "" && !sshUserPattern.MatchString(cc.User) {
+			return Inventory{}, fmt.Errorf("%s: command center %q has an invalid ssh user", inventoryFile, cc.Name)
 		}
 	}
 	return inventory, nil
@@ -257,7 +270,7 @@ func FleetStatus(buildVersion string, timeout time.Duration) ([]MachineSummary, 
 
 func remoteSummary(ctx context.Context, cc CommandCenter) MachineSummary {
 	row := MachineSummary{Name: cc.Name, Platform: cc.Platform}
-	out, err := runSSH(ctx, cc.SSH, "status", "--summary", "--json")
+	out, err := runSSH(ctx, cc, "status", "--summary", "--json")
 	if err != nil {
 		row.Error = sshFailure(err)
 		if envelope, ok := remoteError(err, out); ok {
@@ -346,7 +359,7 @@ func RemoteStatus(name string, timeout time.Duration) (output []byte, clean bool
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		out, err := runSSH(ctx, cc.SSH, "status", "--local", "--json")
+		out, err := runSSH(ctx, cc, "status", "--local", "--json")
 		var exit *exec.ExitError
 		nonClean := errors.As(err, &exit) && exit.ExitCode() == 1 && len(out) > 0
 		if err != nil && !nonClean {

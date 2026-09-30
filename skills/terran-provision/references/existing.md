@@ -23,7 +23,7 @@ If `terran` itself is missing or not enrolled, switch to `fresh.md` from stage 4
 3. Not enrolled, or enrolled without the overlay: `terran enroll --repo <public> --overlay <private> --name <name>`. Re-enrolling the same catalog keeps holds and can rename the machine or add an overlay. Dropping or changing an overlay that owns applied items fails with `repository_mismatch`; do not work around it.
 4. Pending catalog changes: `terran plan --json`, show the user, approval, `terran apply --expect <digest>`.
 5. Missing tools: `mise install`, then the missing items in the overlay's `provision/checklist.md`. Skip items that already work; verify them instead (`claude mcp list`, `codex mcp list`).
-6. Fleet access: confirm the machine appears in `command-centers.json`; add it if not (see `fresh.md` stage 9).
+6. Fleet access: run the `terran-fleet` procedure "Connect the fleet (SSH and Herdr)" with this machine as N. It skips what already works (inventory entry, fleet key, Herdr links).
 
 ## Existing items that collide
 

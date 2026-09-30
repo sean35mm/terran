@@ -122,7 +122,7 @@ func TestCLIJSONUsageError(t *testing.T) {
 	if code := run([]string{"plan", "--target", "wrong", "--json"}, &out, &errOut); code != 2 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
-	assertJSONError(t, out.Bytes(), terran.CodeUsage, "target must be all, agents, claude, opencode, codex, mise, or t3", "")
+	assertJSONError(t, out.Bytes(), terran.CodeUsage, "target must be all, agents, claude, opencode, codex, mise, ssh, or t3", "")
 }
 
 func TestCLIJSONWriteFailureIsNonzero(t *testing.T) {

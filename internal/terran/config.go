@@ -72,6 +72,38 @@ func validateTextConfig(data []byte) error {
 	return nil
 }
 
+// validateSSHConfig accepts an ssh_config fragment: text rules, and never
+// key material.
+func validateSSHConfig(data []byte) error {
+	if err := validateTextConfig(data); err != nil {
+		return err
+	}
+	if bytes.Contains(data, []byte("PRIVATE KEY")) {
+		return fmt.Errorf("ssh files must not contain private keys")
+	}
+	return nil
+}
+
+// validateAuthorizedKeys accepts only comments and public key lines, each
+// optionally prefixed with sshd options such as from="...".
+func validateAuthorizedKeys(data []byte) error {
+	if err := validateSSHConfig(data); err != nil {
+		return err
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !publicKeyLine.MatchString(line) {
+			return fmt.Errorf("line %d is not a public key entry", i+1)
+		}
+	}
+	return nil
+}
+
+var publicKeyLine = regexp.MustCompile(`(^|[\s,"])(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) AAAA[A-Za-z0-9+/]+={0,3}( |$)`)
+
 func decodeUniqueJSONValue(dec *json.Decoder, path string) (any, error) {
 	token, err := dec.Token()
 	if err != nil {
