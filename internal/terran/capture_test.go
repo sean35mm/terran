@@ -139,6 +139,12 @@ func TestDoctorChecksRequiredTools(t *testing.T) {
 	if result.Healthy {
 		t.Fatal("doctor healthy with a missing tool")
 	}
+	home, _ := os.UserHomeDir()
+	mustWrite(t, filepath.Join(home, ".local", "bin", "terran"), "#!/bin/sh\n", 0o755)
+	checks := Doctor("test").Checks
+	if check := checks[len(checks)-1]; check.Name != "binary_path" || check.Status != "warn" || !strings.Contains(check.Message, "installed at "+filepath.Join(home, ".local", "bin", "terran")+"; only this shell's PATH lacks it") {
+		t.Fatalf("binary_path = %#v", check)
+	}
 }
 
 func TestDuplicateToolAcrossCatalogsIsInvalid(t *testing.T) {

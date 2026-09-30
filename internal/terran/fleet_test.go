@@ -107,7 +107,7 @@ func TestFleetStatusRemoteErrorEnvelopeAndMissingTools(t *testing.T) {
 		if alias == "cc2" {
 			return []byte(`{"schema_version":2,"error":{"code":"not_enrolled","message":"status failed: lstat x:\nno such file","next":"enroll"}}`), exitError(t, "1")
 		}
-		return []byte(`{"name":"x","platform":"linux","local":false,"reachable":true,"terran_version":"0.4.0","clean":true,"healthy":true,"held":0,"drifted":0,"blocked":0,"tools_missing":2}`), nil
+		return []byte(`{"name":"x","platform":"linux","local":false,"reachable":true,"terran_version":"0.4.0","clean":true,"healthy":true,"held":0,"drifted":0,"blocked":0,"tools_missing":2,"overlay_behind":1}`), nil
 	})
 	rows, err := FleetStatus("0.4.0", time.Second)
 	if err != nil || len(rows) != 3 {
@@ -116,7 +116,7 @@ func TestFleetStatusRemoteErrorEnvelopeAndMissingTools(t *testing.T) {
 	if cc2 := rows[1]; cc2.Reachable || cc2.Error != "not_enrolled: status failed: lstat x: no such file" {
 		t.Fatalf("error envelope row %#v", cc2)
 	}
-	if cc3 := rows[2]; !cc3.Reachable || !cc3.Healthy || cc3.ToolsMissing != 2 {
+	if cc3 := rows[2]; !cc3.Reachable || !cc3.Healthy || cc3.ToolsMissing != 2 || cc3.OverlayBehind == nil || *cc3.OverlayBehind != 1 || cc3.CatalogDirty != nil {
 		t.Fatalf("tools row %#v", cc3)
 	}
 }
@@ -139,6 +139,60 @@ func TestLocalSummaryCountsMissingToolsWithoutUnhealthy(t *testing.T) {
 	summary, err := LocalSummary("0.4.0")
 	if err != nil || summary.ToolsMissing != 1 || !summary.Healthy || !summary.Clean {
 		t.Fatalf("summary %#v %v; doctor %#v", summary, err, Doctor("0.4.0"))
+	}
+}
+
+func TestLocalSummaryReportsCatalogGitState(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	_, repo := testEnvironment(t)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	upstream := filepath.Join(filepath.Dir(repo), "upstream.git")
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-c", "user.name=test", "-c", "user.email=", "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("-C", repo, "init", "-q")
+	git("-C", repo, "add", "-A")
+	git("-C", repo, "commit", "-q", "-m", "catalog")
+	git("clone", "-q", "--bare", repo, upstream)
+	git("-C", repo, "remote", "add", "origin", upstream)
+	git("-C", repo, "fetch", "-q", "origin")
+	git("-C", repo, "branch", "-q", "--set-upstream-to", "origin/main")
+	if err := os.WriteFile(filepath.Join(repo, "notes.txt"), []byte("later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("-C", repo, "add", "notes.txt")
+	git("-C", repo, "commit", "-q", "-m", "later")
+	git("-C", repo, "push", "-q", "origin", "main")
+	git("-C", repo, "reset", "-q", "--hard", "HEAD~1")
+	if err := os.WriteFile(filepath.Join(repo, "uncommitted.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "cc1", "", false); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := LocalSummary("0.4.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CatalogDirty == nil || *summary.CatalogDirty != 1 || summary.CatalogAhead == nil || *summary.CatalogAhead != 0 || summary.CatalogBehind == nil || *summary.CatalogBehind != 1 {
+		t.Fatalf("catalog git state %v %v %v", summary.CatalogDirty, summary.CatalogAhead, summary.CatalogBehind)
+	}
+	if summary.OverlayDirty != nil || summary.OverlayAhead != nil || summary.OverlayBehind != nil {
+		t.Fatalf("overlay git state without an overlay: %#v", summary)
+	}
+	data, _ := json.Marshal(summary)
+	if !strings.Contains(string(data), `"catalog_dirty":1,"catalog_ahead":0,"catalog_behind":1`) || strings.Contains(string(data), "overlay_dirty") {
+		t.Fatalf("summary JSON %s", data)
+	}
+	git("-C", repo, "branch", "-q", "--unset-upstream")
+	if summary, err = LocalSummary("0.4.0"); err != nil || summary.CatalogDirty == nil || summary.CatalogAhead != nil || summary.CatalogBehind != nil {
+		t.Fatalf("without upstream: %#v %v", summary, err)
 	}
 }
 

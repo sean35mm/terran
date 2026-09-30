@@ -768,6 +768,36 @@ func TestPlanDigestBindsCollidingContent(t *testing.T) {
 	}
 }
 
+func TestPlanDigestBindsCollidingSkillFiles(t *testing.T) {
+	_, repo := testEnvironment(t)
+	paths, _ := ResolvePaths()
+	destination, _ := skillDestination(paths, "agents", "example")
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(destination, "mine.txt")
+	if err := os.WriteFile(inner, []byte("mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Enroll(repo, "test", "", false); err != nil {
+		t.Fatal(err)
+	}
+	reviewed := mustPlan(t, "agents")
+	if err := os.WriteFile(inner, []byte("MINE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if mustPlan(t, "agents").Digest == reviewed.Digest {
+		t.Fatal("digest ignores file content inside a colliding skill directory")
+	}
+	_, err := ApplyWithOptions("agents", "test", ApplyOptions{ExpectDigest: reviewed.Digest, Decisions: map[string]CollisionDecision{"skill/agents/example": CollisionReplace}})
+	if !hasCode(err, CodePlanChanged) {
+		t.Fatalf("changed skill collision applied against the reviewed digest: %v", err)
+	}
+	if got, _ := os.ReadFile(inner); string(got) != "MINE" {
+		t.Fatalf("destination replaced: %q", got)
+	}
+}
+
 func TestDecideKeepHoldsWithoutTouchingDestination(t *testing.T) {
 	_, repo := instructionEnvironment(t, "claude-global", "opencode-global")
 	prepareInstructionParents(t)

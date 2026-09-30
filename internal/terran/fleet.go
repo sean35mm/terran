@@ -59,8 +59,17 @@ type MachineSummary struct {
 	Blocked       int    `json:"blocked"`
 	// ToolsMissing counts catalog tools not on PATH. They do not make a
 	// machine unhealthy: non-interactive ssh often has a shorter PATH.
-	ToolsMissing int    `json:"tools_missing"`
-	Error        string `json:"error,omitempty"`
+	ToolsMissing int `json:"tools_missing"`
+	// Git state of the catalog and overlay checkouts: uncommitted paths and
+	// commits ahead of or behind the upstream (no fetch). Nil when git, the
+	// repository, or the upstream is unavailable. They do not affect Clean or Healthy.
+	CatalogDirty  *int   `json:"catalog_dirty,omitempty"`
+	CatalogAhead  *int   `json:"catalog_ahead,omitempty"`
+	CatalogBehind *int   `json:"catalog_behind,omitempty"`
+	OverlayDirty  *int   `json:"overlay_dirty,omitempty"`
+	OverlayAhead  *int   `json:"overlay_ahead,omitempty"`
+	OverlayBehind *int   `json:"overlay_behind,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 // runSSH runs the remote terran with a fixed argument vector; nothing goes through a shell.
@@ -114,6 +123,33 @@ var gitHead = func(repo string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// runGit runs git in repo with a fixed argument vector and a short timeout.
+func runGit(repo string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", append([]string{"--no-optional-locks", "-C", repo}, args...)...).Output()
+	return string(out), err
+}
+
+// gitState reports the uncommitted path count and the ahead/behind counts
+// against the upstream; each is nil when git cannot tell.
+func gitState(repo string) (dirty, ahead, behind *int) {
+	if repo == "" {
+		return nil, nil, nil
+	}
+	if out, err := runGit(repo, "status", "--porcelain"); err == nil {
+		n := strings.Count(out, "\n")
+		dirty = &n
+	}
+	if out, err := runGit(repo, "rev-list", "--left-right", "--count", "HEAD...@{upstream}"); err == nil {
+		var a, b int
+		if _, err := fmt.Sscanf(out, "%d\t%d", &a, &b); err == nil {
+			ahead, behind = &a, &b
+		}
+	}
+	return dirty, ahead, behind
 }
 
 func shortCommit(repo string) string {
@@ -201,6 +237,8 @@ func LocalSummary(buildVersion string) (MachineSummary, error) {
 		Clean:         status.Clean,
 		Healthy:       true,
 	}
+	summary.CatalogDirty, summary.CatalogAhead, summary.CatalogBehind = gitState(enrollment.RepositoryPath)
+	summary.OverlayDirty, summary.OverlayAhead, summary.OverlayBehind = gitState(enrollment.OverlayPath)
 	for _, check := range Doctor(buildVersion).Checks {
 		switch {
 		case check.Status != "fail":
@@ -283,7 +321,11 @@ func remoteSummary(ctx context.Context, cc CommandCenter) MachineSummary {
 		row.Error = err.Error()
 		return row
 	}
-	if !summaryVersionPattern.MatchString(remote.TerranVersion) || (remote.CatalogCommit != "" && !summaryCommitPattern.MatchString(remote.CatalogCommit)) || (remote.OverlayCommit != "" && !summaryCommitPattern.MatchString(remote.OverlayCommit)) || remote.Held < 0 || remote.Drifted < 0 || remote.Blocked < 0 || remote.ToolsMissing < 0 {
+	negative := false
+	for _, count := range []*int{remote.CatalogDirty, remote.CatalogAhead, remote.CatalogBehind, remote.OverlayDirty, remote.OverlayAhead, remote.OverlayBehind} {
+		negative = negative || (count != nil && *count < 0)
+	}
+	if negative || !summaryVersionPattern.MatchString(remote.TerranVersion) || (remote.CatalogCommit != "" && !summaryCommitPattern.MatchString(remote.CatalogCommit)) || (remote.OverlayCommit != "" && !summaryCommitPattern.MatchString(remote.OverlayCommit)) || remote.Held < 0 || remote.Drifted < 0 || remote.Blocked < 0 || remote.ToolsMissing < 0 {
 		row.Error = "incompatible terran"
 		return row
 	}
@@ -291,6 +333,8 @@ func remoteSummary(ctx context.Context, cc CommandCenter) MachineSummary {
 	row.TerranVersion, row.CatalogCommit, row.OverlayCommit = remote.TerranVersion, remote.CatalogCommit, remote.OverlayCommit
 	row.Clean, row.Healthy = remote.Clean, remote.Healthy
 	row.Held, row.Drifted, row.Blocked, row.ToolsMissing = remote.Held, remote.Drifted, remote.Blocked, remote.ToolsMissing
+	row.CatalogDirty, row.CatalogAhead, row.CatalogBehind = remote.CatalogDirty, remote.CatalogAhead, remote.CatalogBehind
+	row.OverlayDirty, row.OverlayAhead, row.OverlayBehind = remote.OverlayDirty, remote.OverlayAhead, remote.OverlayBehind
 	return row
 }
 

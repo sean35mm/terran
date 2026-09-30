@@ -140,6 +140,7 @@ terran status --summary --json
 terran capture [--target ...] [--json]
 terran hold ITEM_ID [--json]
 terran unhold ITEM_ID [--json]
+terran forget ITEM_ID [--json]
 terran doctor [--json]
 ```
 
@@ -212,12 +213,19 @@ Read-only.
   `incompatible terran`, or `<code>: <message>` when the remote Terran reported
   a JSON error. A reachable row appends `, N tools missing` when catalog tools
   are not on the remote `PATH` (`tools_missing`). Non-interactive SSH often has
-  a shorter `PATH`, so missing tools alone do not make a row `unhealthy`. With
-  `--json`:
+  a shorter `PATH`, so missing tools alone do not make a row `unhealthy`.
+  A reachable row then appends the git state of each checkout when it is not
+  zero, for example `clean (1 held), catalog 2 uncommitted, overlay 1 behind`:
+  `catalog_dirty`/`overlay_dirty` count lines of `git status --porcelain`, and
+  `catalog_ahead`, `catalog_behind`, `overlay_ahead`, `overlay_behind` count
+  commits against the checkout's upstream as last fetched (Terran never
+  fetches). A field is omitted when git, the repository, or the upstream is
+  unavailable, and on machines running an older Terran. Git state never changes
+  `clean` or `healthy`. With `--json`:
 
   ```json
   {"schema_version":2,"command_centers":[
-    {"name":"cc1","platform":"darwin","local":true,"reachable":true,"terran_version":"0.4.0","catalog_commit":"9d467fb","overlay_commit":"4e1a2c0","clean":true,"healthy":true,"held":1,"drifted":0,"blocked":0,"tools_missing":0},
+    {"name":"cc1","platform":"darwin","local":true,"reachable":true,"terran_version":"0.4.0","catalog_commit":"9d467fb","overlay_commit":"4e1a2c0","clean":true,"healthy":true,"held":1,"drifted":0,"blocked":0,"tools_missing":0,"catalog_dirty":0,"catalog_ahead":0,"catalog_behind":0,"overlay_dirty":0,"overlay_ahead":0,"overlay_behind":0},
     {"name":"cc3","platform":"linux","local":false,"reachable":false,"clean":false,"healthy":false,"held":0,"drifted":0,"blocked":0,"tools_missing":0,"error":"offline"}
   ]}
   ```
@@ -288,6 +296,29 @@ enrollment state changes. An id the plan does not contain fails with
 {"schema_version":2,"holds":["skill/claude/herdr"]}
 ```
 
+### forget
+
+`terran forget ITEM_ID` drops Terran's record of one item: its receipt entry
+(skill, instruction, config, file, or settings key) and its hold. Only private
+state changes; the destination and every backup are left as they are. The
+next plan treats the item as unowned: `adopt` if it matches the catalog,
+`blocked_collision` if it differs, or nothing if the catalog no longer has it.
+Use it to clear a stale hold or record (a skill deleted long ago but still
+owned and held, a config target removed from the catalog but still held), or
+to resolve drift in favor of the catalog: `terran forget ID`, then
+`terran plan --json` and `terran apply --expect D --decide ID=replace` after
+the user approves. An id that is neither owned nor held fails with
+`unknown_item`; a malformed id is a usage error.
+
+```json
+{"schema_version":2,"id":"instruction/claude-global","receipt":true,"held":false,"backup":"<home>/.local/state/terran/backups/claude-global/original"}
+```
+
+`backup` appears when the dropped entry referenced a private backup (an adopted
+file). Terran keeps it. Show it to the user: while it exists, a later adopt or
+replace of the same item can stay `blocked_collision`. Forgetting a replaced
+settings key discards the original value Terran would have restored.
+
 ### enroll
 
 Records the trusted local catalog, optionally a private overlay, and this
@@ -344,7 +375,7 @@ reports the matching status.
 | `overlay_unavailable` | The enrolled private overlay is missing, moved, or invalid. | Clone it back to the recorded path or re-enroll. Terran fails closed so nothing is removed. |
 | `plan_changed` | The `--expect` digest no longer matches, or a settings file changed after planning (including while apply was writing it; the other writer's file is kept). | Run `terran plan --json` again, show the user, get approval again. |
 | `partial_apply` | Apply committed its changes and receipt, but the holds for `keep` decisions were not saved. | Run `terran hold ITEM_ID` for each kept item named in `message`, then `terran plan --json`. |
-| `unknown_item` | The item id is malformed or not in the plan. | List ids with `terran plan --json`. |
+| `unknown_item` | The item id is malformed or not in the plan (for `forget`: neither receipt-owned nor held). | List ids with `terran plan --json`. |
 | `unreachable` | `terran status NAME` could not reach the machine over SSH. | Check SSH access and `~/.local/bin/terran` on that machine. |
 | `usage` | Bad flags, or `--decide` for an item that is not a `blocked_collision`. | Fix the command (exit `2`). |
 | `operational` | Anything else. | Read `message` and `next`. |
@@ -629,6 +660,10 @@ A differing existing item that Terran does not own is a `blocked_collision`.
 - `--decide <id>=keep`: the destination is left untouched and the item is held on
   this machine (`held`), so later plans skip it. `terran unhold <id>` reverses it.
 
+`terran forget <id>` clears a hold or ownership record that no longer means
+anything, such as a hold on an item the catalog dropped; the destination is
+left as is.
+
 For instructions, configs, and files, only safe items can be replaced: regular,
 non-symlink, single-link, effective-user-owned files in safe parents. Symlinks,
 hard links, directories, devices, and unsafe files or parents remain blocked.
@@ -665,7 +700,12 @@ Terran's protection boundary.
 With a receipt, Terran updates an item only when the active content matches the
 previously applied hash. External edits, missing targets, or tampered backups are
 `blocked_drift` and block the selected apply. Stop and ask the user. Do not
-delete, move, or overwrite content to make the plan clean. The target id is
+delete, move, or overwrite content to make the plan clean. If the user wants
+the catalog version over the local edit, run `terran forget <id>`: the item
+then plans as `blocked_collision`, and `--decide <id>=replace` backs up the
+edited file and installs the catalog version. To keep the edit instead, sync it
+into the catalog source (the plan then shows an `update` that only records it)
+or `terran hold <id>`. The target id is
 resolved to a fixed path every time; a catalog or receipt path is never authority
 for a destination.
 

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -134,7 +135,26 @@ func machineState(row terran.MachineSummary) string {
 	if row.ToolsMissing > 0 {
 		state += fmt.Sprintf(", %d tools missing", row.ToolsMissing)
 	}
+	state += gitState("catalog", row.CatalogDirty, row.CatalogAhead, row.CatalogBehind)
+	state += gitState("overlay", row.OverlayDirty, row.OverlayAhead, row.OverlayBehind)
 	return state
+}
+
+// gitState renders the nonzero git counts of one checkout, e.g. ", catalog 2 uncommitted, 1 behind".
+func gitState(repo string, dirty, ahead, behind *int) string {
+	var parts []string
+	for _, count := range []struct {
+		n     *int
+		label string
+	}{{dirty, "uncommitted"}, {ahead, "ahead"}, {behind, "behind"}} {
+		if count.n != nil && *count.n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", *count.n, count.label))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", " + repo + " " + strings.Join(parts, ", ")
 }
 
 func dash(s string) string {
