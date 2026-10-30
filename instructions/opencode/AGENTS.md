@@ -52,10 +52,14 @@ even when more work looks useful.
    Read candidates and compare contracts, side effects, dependencies, ownership,
    and tests before reusing. Prefer extending a suitable existing implementation;
    do not force reuse across incompatible boundaries or introduce an abstraction
-   merely to remove superficial duplication.
+   merely to remove superficial duplication. Before writing new code, check in
+   order: is it needed at all; does this codebase, the standard library, a native
+   platform feature, or an installed dependency already do it? Write new code only
+   when none does.
 4. Make the smallest correct change and preserve unrelated work. No speculative or
    "while we're here" edits; no abstractions, refactors, logging, comments, or
-   cleanup unless directly necessary.
+   cleanup unless directly necessary. Fix bugs at the root cause: correct a shared
+   function once rather than guarding each caller.
 5. Review the resulting diff for scope, correctness, side effects, and consistency
    with nearby code. Run the smallest relevant verification and stop when it
    succeeds. If it fails, diagnose within scope or report the blocker.
