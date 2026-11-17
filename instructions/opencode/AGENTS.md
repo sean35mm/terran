@@ -68,7 +68,8 @@ even when more work looks useful.
 
 ## Orchestration
 
-Naru's coordinator prompt owns delegation strategy. For any agent that delegates:
+When running under Naru, follow its coordinator prompt for delegation strategy.
+For any agent that delegates:
 
 - Give each subagent one objective, the needed context, an owned scope, and a concrete
   deliverable.
@@ -143,8 +144,6 @@ Naru's coordinator prompt owns delegation strategy. For any agent that delegates
 
 ## Final response
 
-- Before sending a final answer, invoke the `unslop` skill and apply it. Skip it for
-  progress updates, tool-only messages, and machine-readable output.
 - Lead with the outcome. Summarize what changed and why.
 - List every modified file and the change made in each.
 - Report checks actually run, not checks merely recommended.
