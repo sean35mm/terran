@@ -2,6 +2,11 @@
 
 All notable changes are documented here. Terran follows semantic versioning.
 
+## 0.4.6 - 2026-11-17
+
+- Claude Code now imports OpenCode's global `AGENTS.md` so both use the same engineering instructions. The shared instructions no longer require the `unslop` skill, and the Naru delegation rule applies only under Naru.
+- Global instructions now tell agents to check existing code, the standard library, platform features, and installed dependencies before writing new code.
+
 ## 0.4.5 - 2026-09-30
 
 - `terran doctor` (and the fleet `tools_missing` count) also finds catalog tools in `~/.local/bin` and mise's shims directory when `PATH` lacks them. Tailscale SSH runs remote commands with a bare `PATH` and no shell startup files, so fleet rows no longer report installed tools as missing.
